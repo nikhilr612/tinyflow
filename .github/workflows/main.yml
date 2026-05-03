@@ -3,7 +3,7 @@ on:
   push:
     branches: 
       - master
-      - feat/ci
+      - feat/ci-1
 
 jobs:
   uv-check:
