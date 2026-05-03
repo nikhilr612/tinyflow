@@ -102,10 +102,3 @@ if __name__ == "__main__":
     a = generate_cardioid_data(CardioidDataParams())
     assert a.shape == (32, 64, 2)
     jnp.save("toycardioid", a)
-
-    import rerun as rr
-
-    a = a.tolist()
-    rr.init("cardioid_dataset", spawn=True)
-    for i in range(64):  # for each image
-        rr.log(f"cardioid/image_{i}", rr.Points2D(a[i]))
