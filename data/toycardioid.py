@@ -1,6 +1,4 @@
-"""
-A toy dataset that generates points along a cardioid curve.
-"""
+"""A toy dataset that generates points along a cardioid curve."""
 
 from dataclasses import dataclass
 from typing import SupportsIndex
@@ -13,6 +11,8 @@ from jax import random as jax_random
 
 @dataclass
 class CardioidDataParams:
+    """Parameters for generating cardioid data."""
+
     n_images: int = 32
     n_t: int = 64
     r: float = 2.0
@@ -23,16 +23,13 @@ class CardioidDataParams:
 
 
 def generate_cardioid_data(params: CardioidDataParams) -> Array:
-    """
-    Generates points along a cardioid curve with added noise.
+    """Generates points along a cardioid curve with added noise.
 
     Args:
-        num_points (int): Number of data points to generate.
-        noise_level (float): Standard deviation of Gaussian noise to add.
-        seed (int): Random seed for reproducibility.
+        params: Parameters for generating cardioid data.
 
     Returns:
-        jnp.ndarray: Array of shape (num_points, 2) containing the generated points.
+        Array of shape (n_images, n_t, 2) containing the generated points.
     """
     key = jax_random.PRNGKey(params.seed)
     t = jnp.linspace(0, 2 * jnp.pi, params.n_t).reshape(1, -1)  # Shape (1, n_t)
@@ -67,20 +64,23 @@ def generate_cardioid_data(params: CardioidDataParams) -> Array:
     points = jnp.stack([x, y], axis=2)
 
     noise = params.sigma_xy * jax_random.normal(key, shape=points.shape)
-    noisy_points = points + noise
-
-    return noisy_points
+    return points + noise
 
 
 class PointsImage(grain.sources.RandomAccessDataSource):
+    """Grain data source for loading cardioid point images."""
+
     def __init__(self, fpath: str):
+        """Initializes data source from the given file path."""
         loaded = jnp.load(fpath)
         self._data = loaded.reshape(loaded.shape[0] * loaded.shape[1], -1)
 
     def __len__(self) -> int:
+        """Returns total number of data points."""
         return self._data.shape[0]  # (N*M, ...)
 
     def __getitem__(self, index: SupportsIndex) -> Array:
+        """Returns data point at the specified index."""
         return self._data[index]  # (1, ...)
 
 
@@ -89,6 +89,7 @@ def cardioid_dataset(
     batch_size: int = 32,
     seed: int | None = None,
 ) -> grain.MapDataset:
+    """Creates a Grain dataset for cardioid training data."""
     return (
         grain.MapDataset.source(PointsImage(fpath))
         .shuffle(seed)
