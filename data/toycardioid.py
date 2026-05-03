@@ -11,14 +11,23 @@ from jax import random as jax_random
 
 @dataclass
 class CardioidDataParams:
-    """Parameters for generating cardioid data."""
+    """Parameters for generating cardioid data.
+
+    Attributes:
+        n_images: Number of "images" in the dataset
+        n_t: Number of uniform (x,y) samples from carioid per "image"
+        r: Radial parameter of cardioid
+        sigma_r: Variance of `r`, serves as epistemic uncertainty in parameter
+        sigma_xy: Observation error, serves as aleotoric uncertainty
+        seed: The random seed to use for generation
+    """
 
     n_images: int = 32
     n_t: int = 64
     r: float = 2.0
-    sigma_r: float = 0.5
-    sigma_xy: float = 0.05
-    sigma_theta_deg: float = 5.0
+    sigma_r: float = 0.05  # parameter noise
+    sigma_xy: float = 0.025  # observation noise
+    sigma_theta_deg: float = 4.0  # small random rotation
     seed: int = 42
 
 
