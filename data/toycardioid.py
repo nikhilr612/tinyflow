@@ -1,5 +1,7 @@
 """A toy dataset that generates points along a cardioid curve."""
 
+import random
+
 from dataclasses import dataclass
 from typing import SupportsIndex
 
@@ -82,7 +84,9 @@ class PointsImage(grain.sources.RandomAccessDataSource):
     def __init__(self, fpath: str):
         """Initializes data source from the given file path."""
         loaded = jnp.load(fpath)
+        print(f"Loaded data of shape: {loaded.shape}")
         self._data = loaded.reshape(loaded.shape[0] * loaded.shape[1], -1)
+        print(f"Reshaped to {self._data.shape}")
 
     def __len__(self) -> int:
         """Returns total number of data points."""
@@ -98,13 +102,23 @@ def cardioid_dataset(
     batch_size: int = 32,
     seed: int | None = None,
 ) -> grain.MapDataset:
-    """Creates a Grain dataset for cardioid training data."""
+    """Creates a Grain dataset for cardioid training data.
+
+    Args:
+        fpath: The path to data
+        batch_size: Batch size to use in loader
+        seed: The seed to use for shuffling the dataset. If None, a random seed is used.
+    """
+    if seed is None:
+        seed = random.getrandbits(16)
+
+    def batch_fn(x):
+        return jnp.stack(x, axis=0)  # use stack instead of concat
+
     return (
         grain.MapDataset.source(PointsImage(fpath))
         .shuffle(seed)
-        .batch(
-            batch_size, batch_fn=lambda x: jnp.concat(x)
-        )  # use concat instead of stack
+        .batch(batch_size, batch_fn=batch_fn)
     )
 
 

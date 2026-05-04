@@ -13,6 +13,7 @@ dependencies = [
     "jax[cuda13]>=0.8.0",
     "jaxtyping>=0.3.3",
     "optax>=0.2.6",
+    "tqdm>=4.67.3",
     "typer-slim>=0.20.0",
 ]
 
