@@ -120,24 +120,42 @@ class ToyFM:
             return eqx.tree_deserialise_leaves(f, like.u_theta)
 
     def sample(
-        self,
-        batch_size: int,
-        key: PRNGKeyArray,
-    ) -> Float[Array, " {batch_size} T"]:
+        self, batch_size: int, key: PRNGKeyArray, ts: Float[Array, " L"]
+    ) -> Float[Array, " {batch_size} L T"]:
         """Sample a batch of data from this model.
 
         Args:
             batch_size: Number of data points to sample
+            ts: Timestamps at which to save the data.
+                If only the final generated point is needed, set to 1.
             key: PRNG key
         """
         x_0 = jax.random.normal(key, shape=(batch_size, self.i_dim))
-        ode_term = diffrax.ODETerm(lambda t, x, _args: self.u_theta(t, x))
+        ode_term = diffrax.ODETerm(
+            # ugly `expand_dims` and `squeeze`
+            # due to the fact that vmap, diffeqsolve expect _unbatched_ functions.
+            # this is in line with jaxland, but not so much the convention elsewhere.
+            lambda t, x, _args: self.u_theta(
+                jax.numpy.expand_dims(t, 0),
+                jax.numpy.expand_dims(x, 0),
+            ).squeeze(axis=0),
+        )
 
         @jax.vmap
         def solve(x_i):
-            diffrax.diffeqsolve(ode_term, diffrax.Dopri5(), t0=0.0, t1=1.0, y0=x_i)
+            return diffrax.diffeqsolve(
+                ode_term,
+                diffrax.Dopri5(),
+                t0=0.0,
+                t1=1.0,
+                y0=x_i,
+                dt0=0.01,
+                saveat=diffrax.SaveAt(ts=ts),
+            )
 
-        return solve(x_0)
+        s = solve(x_0)
+        print(f"Sol: {s}")
+        return s.ys
 
     @jaxtyped(typechecker=beartype.beartype)
     @staticmethod
@@ -179,28 +197,29 @@ def train_on(
     optimizer_state = optimizer.init(eqx.filter(model.u_theta, eqx.is_inexact_array))
 
     @eqx.filter_jit
-    def make_update(key: PRNGKeyArray, model: ToyFM, batch: jax.Array, optimizer_state):
+    def make_update(
+        key: PRNGKeyArray, u_theta: VelocityField, batch: jax.Array, optimizer_state
+    ):
         newkey, sk1, sk2 = jax.random.split(key, num=3)
         batch_size = batch.shape[0]
         t = jax.random.uniform(sk1, shape=(batch_size,))
         rand_input = jax.random.normal(sk2, shape=batch.shape)
-        loss, grad = jax.value_and_grad(ToyFM.train_step)(
-            model.u_theta, t, rand_input, batch
-        )
+        loss, grad = jax.value_and_grad(ToyFM.train_step)(u_theta, t, rand_input, batch)
         updates, optimizer_state = optimizer.update(grad, optimizer_state)
-        model.u_theta = eqx.apply_updates(model.u_theta, updates)
-        return (newkey, model, optimizer_state, loss)
+        u_theta = eqx.apply_updates(u_theta, updates)
+        return (newkey, u_theta, optimizer_state, loss)
 
     for epoch in (pbar := tqdm(desc="run", iterable=range(n_epochs), total=n_epochs)):
         net_loss = 0
         count = 0
         for batch in tqdm(iterable=dataset, desc="epoch", leave=False):
-            key, model, optimizer_state, loss = make_update(
+            key, new_utheta, optimizer_state, loss = make_update(
                 key,
-                model,
+                model.u_theta,
                 batch,
                 optimizer_state,
             )
+            model.u_theta = new_utheta
             net_loss += loss
             count += 1
         avg_loss = loss / count
