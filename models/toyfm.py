@@ -154,7 +154,6 @@ class ToyFM:
             )
 
         s = solve(x_0)
-        print(f"Sol: {s}")
         return s.ys
 
     @jaxtyped(typechecker=beartype.beartype)
@@ -222,7 +221,7 @@ def train_on(
             model.u_theta = new_utheta
             net_loss += loss
             count += 1
-        avg_loss = loss / count
+        avg_loss = net_loss / count
         pbar.set_postfix({"loss": f"{avg_loss:.4f}"})
 
     return model
