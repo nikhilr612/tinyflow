@@ -1,7 +1,6 @@
 """A toy dataset that generates points along a cardioid curve."""
 
 import random
-
 from dataclasses import dataclass
 from typing import SupportsIndex
 
