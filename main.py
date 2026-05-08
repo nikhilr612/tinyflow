@@ -30,7 +30,7 @@ def toy(
     dataset = data.toycardioid.cardioid_dataset(fpath, seed=seed - 7)
     key = jax.random.key(seed)
     key, sk1, sk2 = jax.random.split(key, num=3)
-    model = toyfm.train_on(key, ToyFM(sk1), dataset, n_epochs=n_epochs)
+    model = toyfm.train_on(key, ToyFM.from_key(sk1), dataset, n_epochs=n_epochs)
 
     points = model.sample(16, sk2, jax.numpy.linspace(0, 1, 20))
     create_animation(fpath, points, outpath + ".svg")
