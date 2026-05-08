@@ -70,6 +70,9 @@ def generate_cardioid_data(params: CardioidDataParams) -> Array:
     x = xp * cos_theta - yp * sin_theta
     y = xp * sin_theta + yp * cos_theta
 
+    print(f"debug: x-variance:{x.var()}")
+    print(f"debug: v-variance: {y.var()}")
+
     # Stack x and y coordinates
     points = jnp.stack([x, y], axis=2)
 

@@ -51,11 +51,11 @@ class VelocityField(eqx.Module):
             i_dim: Input dimension.
             h_dim: Hidden dimension or output dimension of first layer.
         """
-        sk1, sk2 = jax.random.split(key, num=2)
+        sk_i, sk_o = jax.random.split(key, num=2)
         self.in_layer = eqx.nn.Linear(
-            in_features=i_dim + 1, out_features=h_dim, key=sk1
+            in_features=i_dim + 1, out_features=h_dim, key=sk_i
         )
-        self.out_layer = eqx.nn.Linear(in_features=h_dim, out_features=i_dim, key=sk2)
+        self.out_layer = eqx.nn.Linear(in_features=h_dim, out_features=i_dim, key=sk_o)
 
     @jaxtyped(typechecker=beartype.beartype)
     def __call__(
@@ -66,24 +66,36 @@ class VelocityField(eqx.Module):
     ) -> Float[Array, " B T"]:
         """Simple MLP as the velocity field."""
         packed, _ = pack([t, x], "B *")
-        h = jax.nn.relu(jax.vmap(self.in_layer)(packed))
+        h = jax.nn.elu(jax.vmap(self.in_layer)(packed))
         return jax.vmap(self.out_layer)(h)
 
 
 class ToyFM:
     """Class implementing training and inference of the toy model."""
 
-    def __init__(self, key: PRNGKeyArray, i_dim: int = 2, h_dim: int = 12):
-        """Initialize Toy FM with the specified velocity field parameters.
+    def __init__(self, velocity_field: VelocityField, i_dim: int, h_dim: int):
+        """Initialize Toy FM with the specified velocity field.
 
         Args:
-            key: Key for random initialization
-            i_dim: Input dimensions to the velocity field
-            h_dim: Hidden dimensions passed to the velocity field
+            velocity_field: The velocity field comprising this model.
+            i_dim: Input dimensions of the velocity field
+            h_dim: Hidden dimensions of the velocity field
         """
         self.i_dim = i_dim
         self.h_dim = h_dim
-        self.u_theta = VelocityField(key, i_dim, h_dim)
+        self.u_theta = velocity_field
+
+    @classmethod
+    def from_key(cls, key: PRNGKeyArray, i_dim: int = 2, h_dim: int = 12):
+        """Create a Toy FM model, with a velocity field of specified parameters.
+
+        Args:
+            key: The PRNG key used to initialize velocity field.
+            i_dim: Input dimensions passed to the velocity field.
+            h_dim: Hidden dimensions passed to the velocity field.
+        """
+        velocity_field = VelocityField(key, i_dim=i_dim, h_dim=h_dim)
+        return cls(velocity_field, i_dim, h_dim)
 
     def save(self, path: str) -> None:
         """Save the learned velocity field parameters to a file at the specified path.
@@ -109,15 +121,20 @@ class ToyFM:
             else:
                 raise RuntimeError(f"Hyperparameters not found in file: {path}.hparams")
         key = jax.random.key(42)
-        like: ToyFM = eqx.filter_eval_shape(
-            ToyFM,
+        like: VelocityField = eqx.filter_eval_shape(
+            VelocityField,
             key,
             i_dim=hparams["i_dim"],
             h_dim=hparams["h_dim"],
         )
 
         with Path(path).open("rb") as f:
-            return eqx.tree_deserialise_leaves(f, like.u_theta)
+            vf = eqx.tree_deserialise_leaves(f, like)  # deserialized velocity field
+            return ToyFM(
+                velocity_field=vf,
+                i_dim=hparams["i_dim"],
+                h_dim=hparams["h_dim"],
+            )
 
     def sample(
         self, batch_size: int, key: PRNGKeyArray, ts: Float[Array, " L"]
@@ -195,6 +212,7 @@ def train_on(
     optimizer = optax.adam(init_lr)
     optimizer_state = optimizer.init(eqx.filter(model.u_theta, eqx.is_inexact_array))
 
+    # Wrap everything in jit so it can be as fast as possible.
     @eqx.filter_jit
     def make_update(
         key: PRNGKeyArray, u_theta: VelocityField, batch: jax.Array, optimizer_state
