@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "beartype>=0.22.4",
+    "datasets>=4.8.5",
     "diffrax>=0.7.2",
     "drawsvg>=2.4.1",
     "einops>=0.8.1",
@@ -13,7 +14,9 @@ dependencies = [
     "grain>=0.2.14",
     "jax[cuda13]>=0.8.0",
     "jaxtyping>=0.3.3",
+    "numpy>=2.4.4",
     "optax>=0.2.6",
+    "pillow>=12.2.0",
     "tqdm>=4.67.3",
     "typer-slim>=0.20.0",
 ]
