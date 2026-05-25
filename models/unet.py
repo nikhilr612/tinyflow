@@ -141,8 +141,9 @@ class UBlock(eqx.Module):
         self.up_conv = eqx.nn.Conv2d(
             in_channels=channels * 2,
             out_channels=channels,
-            kernel_size=2,
-            stride=2,
+            kernel_size=3,
+            stride=1,
+            padding=1,
             key=sk3,
         )
 

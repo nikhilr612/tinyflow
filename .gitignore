@@ -208,3 +208,7 @@ __marimo__/
 
 # training runs
 runs/
+
+# datasets
+data/*/
+.hfcache/*
