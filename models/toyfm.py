@@ -2,6 +2,12 @@
 
 This module contains an implementation of the Flow Matching Recipe,
 using an MLP as the flow velocity field, to generatively model the toy dataset.
+
+Note:
+    This implementation is intentionally standalone,
+    with minimal dependencies on the rest of the codebase.
+    Additionally, the code explicitly tracks the batch dimension for clarity,
+    although this is largely unidiomatic and unnecessary in JAX with `vmap`.
 """
 
 import json

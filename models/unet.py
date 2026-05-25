@@ -100,7 +100,18 @@ class UBlock(eqx.Module):
     - "up" interpolation and ResNet-like blocks
     with concatenation-based skip connections.
     The channels increase two-fold after `down`.
+
+    Note:
+    The skip connections in this Unet are slightly unconventional.
+    This is partly due to a misunderstanding about their original purpose.
+    The "U"-skip connections in this implementation rougly circumvent one encoder block.
+    Indeed, the standard Unet has a skip-connection post-encoder to pre-decoder.
+    Here, the skips are from pre-decoder to post-upsample.
+    The fix is relatively straightforward;
     """
+
+    # TODO(n): Check if current skip connection pattern is detrimental to performance.
+    #          Switch over to proper skip connections.
 
     down_res_block: ResBlock
     down_conv: eqx.nn.Conv2d
