@@ -1,20 +1,20 @@
 """Main entry point for the tinyflow CLI."""
 
-from pathlib import Path
 from typing import Annotated
 
 import jax
-import PIL.Image as Pilimage
 import typer
 
 import data.animefaces
 import data.toycardioid
 import models.toyfm as toyfm
-from data.animefaces import preprocess_all, to_uint8
+import training
+from data.animefaces import load_masks, preprocess_all
 from metrics import compute_real_stats
 from models import ToyFM
-from models.imagefm import ImageFM, train_on_image
+from models.imagefm import ImageFM, TrainConfig
 from models.unet import UNet
+from training import RunConfig
 from viz import create_animation
 
 app = typer.Typer()
@@ -58,8 +58,15 @@ def anime(
     n_steps: int = 64,
     edge_weight: float = 0.1,
     line_weight: float = 0.0,
+    aux_weight: float = 0.0,
+    aux_level: int = 2,
+    mask_path: str = "./.preprocessed/anime_faces_masks.npy",
 ):
-    """Train a flow matching model on the anime faces dataset."""
+    """Train a flow matching model on the anime faces dataset.
+
+    ``--aux-weight > 0`` adds the auxiliary semantic-mask head (see ``UNet``)
+    supervised by the cached masks at ``--mask-path``.
+    """
     assert base_channels % 8 == 0, (
         f"base_channels={base_channels} must be divisible by 8"
     )
@@ -70,43 +77,41 @@ def anime(
     arr = preprocess_all("./data/anime-faces")
     real_stats = compute_real_stats(arr, batch_size=batch_size)
 
+    masks = load_masks(mask_path) if aux_weight > 0 else None
     dataset, batches_per_epoch = data.animefaces.wrap_dataset(
-        arr, batch_size=batch_size, seed=seed
+        arr, masks, batch_size=batch_size, seed=seed
     )
+    hparams = {
+        "base_channels": base_channels,
+        "time_embedding_dim": time_embedding_dim,
+        "n_blocks": n_blocks,
+        "in_channels": 3,
+        "n_aux_classes": 0 if masks is None else masks.shape[-1],
+        "aux_level": aux_level,
+    }
     key = jax.random.key(seed)
-    key, sk1, sk2, sk3 = jax.random.split(key, num=4)
-    unet = UNet(base_channels, time_embedding_dim, sk1, n_blocks, in_channels=3)
-    model = ImageFM(
-        unet,
-        hparams={
-            "base_channels": base_channels,
-            "time_embedding_dim": time_embedding_dim,
-            "n_blocks": n_blocks,
-            "in_channels": 3,
-        },
-        n_steps=n_steps,
-    )
-    model = train_on_image(
+    key, sk1 = jax.random.split(key)
+    unet = UNet(key=sk1, **hparams)
+    model = ImageFM(unet, hparams=hparams, n_steps=n_steps)
+    training.run(
         key,
         model,
         dataset,
         batches_per_epoch,
-        n_epochs=n_epochs,
-        outpath=outpath,
-        eval_every=eval_every,
+        TrainConfig(
+            n_epochs=n_epochs,
+            edge_weight=edge_weight,
+            line_weight=line_weight,
+            aux_weight=aux_weight,
+        ),
+        RunConfig(
+            outpath=outpath,
+            eval_every=eval_every,
+            early_stop_patience=early_stop_patience,
+        ),
         real_stats=real_stats,
-        early_stop_patience=early_stop_patience,
-        edge_weight=edge_weight,
-        line_weight=line_weight,
     )
-    model.save(outpath)
-
-    outdir = Path(outpath).parent
-    x_0 = jax.random.normal(sk3, (1, 64, 64, 3))
-    final_img = to_uint8(model.generate(x_0)[0])
-    Pilimage.fromarray(final_img).save(str(outdir / "sample_final.png"))
     print(f"Saved model to {outpath}")
-    print(f"Saved final sample to {outdir / 'sample_final.png'}")
 
 
 if __name__ == "__main__":

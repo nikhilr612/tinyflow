@@ -59,7 +59,7 @@ def compute_real_stats(
     if cache_path is not None:
         cache = Path(cache_path)
         cache.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(str(cache), **result)
+        np.savez(str(cache), mu=result["mu"], sigma=result["sigma"])
         print(f"Cached real stats to {cache_path}")
 
     return result

@@ -7,6 +7,8 @@ It is agnostic to the choice of velocity model: any eqx.Module implementing
 """
 
 import json
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +17,8 @@ import diffrax
 import equinox as eqx
 import jax
 import optax
-import PIL.Image as Pilimage
-from einops import pack, rearrange, unpack
+from einops import pack, rearrange, reduce, unpack
 from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
-from tqdm import tqdm
-
-from data.animefaces import to_uint8
-from metrics import evaluate_fid
 
 
 @eqx.filter_jit
@@ -203,6 +200,8 @@ class ImageFM:
         edge_weight: float = 0.1,
         line_weight: float = 0.0,
         denom_floor: float = 0.05,
+        masks: Float[Array, " B H W K"] | None = None,
+        aux_weight: float = 0.0,
     ) -> Float[Array, ""]:
         """Single training step: x-prediction with a velocity-space loss.
 
@@ -217,6 +216,17 @@ class ImageFM:
         Auxiliary losses on ``x_hat`` vs ``x_1`` provide perceptual signals; they
         are only possible because the network predicts ``x_hat`` directly.
 
+        A further, representation-level auxiliary is available when ``masks``
+        are given: ``net_theta.forward_aux(x_t, t)`` must then return
+        ``(x_hat, logits)`` with ``logits`` a coarse ``(h, w, K)`` map, and the
+        loss adds ``aux_weight`` times the binary cross-entropy against the
+        area-averaged masks.  Unlike the edge/line terms this does not touch
+        ``x_hat``; it asks a hidden layer to know *where* the semantic parts of
+        the clean image are while looking at the noisy one (cf. REPA, Yu et
+        al. 2025).  Because it is a separate head with its own target it does
+        not re-weight the flow-matching term and so leaves its minimizer, the
+        conditional expectation, intact.
+
         Args:
             net_theta: The denoising model.
             t: Timesteps in ``[0, 1]``, shape ``(B,)``.
@@ -225,18 +235,48 @@ class ImageFM:
             edge_weight: Weight for the auxiliary Sobel edge loss.
             line_weight: Weight for the auxiliary dark-line loss.
             denom_floor: Floor on ``1 - t``; see ``ImageFM.__init__``.
+            masks: Soft semantic masks of ``x_1`` in ``[0, 1]``, shape
+                ``(B, H, W, K)``; ``None`` disables the auxiliary head.
+            aux_weight: Weight for the auxiliary mask loss.
 
         Returns:
             Scalar mean loss.
         """
         t_b = rearrange(t, "b -> b 1 1 1")
         x_t = t_b * x_1 + (1 - t_b) * x_0
-        x_hat = jax.vmap(lambda x, ti: net_theta(x, ti))(x_t, t)
+        if masks is None:
+            x_hat = jax.vmap(lambda x, ti: net_theta(x, ti))(x_t, t)
+            aux_loss = 0.0
+        else:
+            x_hat, logits = jax.vmap(lambda x, ti: net_theta.forward_aux(x, ti))(x_t, t)
+            aux_loss = ImageFM._aux_loss(logits, masks)
         u = (x_hat - x_t) / jax.numpy.maximum(1 - t_b, denom_floor)
         vel_loss = optax.l2_loss(u, x_1 - x_0).mean()
         edge_loss = ImageFM._edge_loss(x_hat, x_1)
         line_loss = ImageFM._line_loss(x_hat, x_1)
-        return vel_loss + edge_weight * edge_loss + line_weight * line_loss
+        return (
+            vel_loss
+            + edge_weight * edge_loss
+            + line_weight * line_loss
+            + aux_weight * aux_loss
+        )
+
+    @jaxtyped(typechecker=beartype.beartype)
+    @staticmethod
+    def _aux_loss(
+        logits: Float[Array, " B h w K"], masks: Float[Array, " B H W K"]
+    ) -> Float[Array, ""]:
+        """Binary cross-entropy between coarse mask logits and area-pooled masks.
+
+        The masks are pooled to the logit resolution with a mean, so the target
+        is the fraction of each cell covered by the part -- a soft label, which
+        sigmoid cross-entropy handles as is.
+        """
+        stride = masks.shape[1] // logits.shape[1]
+        target = reduce(
+            masks, "b (h s1) (w s2) k -> b h w k", "mean", s1=stride, s2=stride
+        )
+        return optax.sigmoid_binary_cross_entropy(logits, target).mean()
 
     @staticmethod
     def _sobel(
@@ -360,15 +400,30 @@ class ImageFM:
         ).mean()
 
 
-def _save_sample(model, outdir, sample_noise, epoch):
-    """Save a sample from fixed noise, both as the latest and as a per-epoch file.
+@dataclass(frozen=True)
+class TrainConfig:
+    """Optimisation and loss hyperparameters: everything the gradient step needs.
 
-    Because the noise is fixed, the ``sample_epoch_*.png`` series shows how the
-    generator's output for one latent evolves over the run.
+    Attributes:
+        n_epochs: Number of full passes over the dataset.
+        init_lr: Learning rate for Adam.
+        edge_weight: Weight for the auxiliary Sobel edge loss.
+        line_weight: Weight for the auxiliary dark-line loss.
+        aux_weight: Weight for the auxiliary mask loss; needs a dataset that
+            yields masks and a ``net_theta`` with ``forward_aux``.
+        t_mu: Mean of the logit-normal timestep distribution
+            ``t = sigmoid(N(t_mu, t_sigma^2))``.  Negative values sample lower
+            ``t`` (higher noise) more often; JiT uses -0.8.
+        t_sigma: Standard deviation of the logit-normal timestep distribution.
     """
-    img = Pilimage.fromarray(to_uint8(model.generate(sample_noise)[0]))
-    img.save(str(outdir / "sample.png"))
-    img.save(str(outdir / f"sample_epoch_{epoch:04d}.png"))
+
+    n_epochs: int = 100
+    init_lr: float = 1e-3
+    edge_weight: float = 0.1
+    line_weight: float = 0.0
+    aux_weight: float = 0.0
+    t_mu: float = -0.8
+    t_sigma: float = 1.0
 
 
 def train_on_image(
@@ -376,142 +431,71 @@ def train_on_image(
     model: ImageFM,
     dataset,
     batches_per_epoch: int,
-    n_epochs: int = 100,
-    init_lr: float = 1e-3,
-    edge_weight: float = 0.1,
-    line_weight: float = 0.0,
-    outpath: str | None = None,
-    eval_every: int = 1,
-    real_stats: dict | None = None,
-    early_stop_patience: int = 0,
-    fid_n_samples: int = 5000,
-    t_mu: float = -0.8,
-    t_sigma: float = 1.0,
-) -> ImageFM:
-    """Train the velocity model via flow matching on an image dataset.
+    cfg: TrainConfig = TrainConfig(),
+) -> Iterator[tuple[int, float]]:
+    """Train ``model`` in place, yielding ``(epoch, mean_loss)`` per epoch.
+
+    This is only the optimisation loop.  It knows nothing about checkpoints,
+    samples, evaluation or stopping criteria; ``training.run`` layers those on
+    by consuming this generator and breaking out of it when it wants to stop.
+    ``model.net_theta`` is updated in place, so it is current at every yield.
 
     Args:
         key: JAX PRNG key.
         model: The ``ImageFM`` instance to train.
-        dataset: An endless dataset yielding batches of shape ``(B, H, W, C)``.
+        dataset: An endless dataset yielding batches of shape ``(B, H, W, C)``,
+            or ``(images, masks)`` pairs of such batches when ``aux_weight > 0``.
         batches_per_epoch: Number of batches making up one pass over the data;
             the dataset never stops on its own, so this is what bounds training.
-        n_epochs: Number of full passes over the dataset.
-        init_lr: Initial learning rate for Adam.
-        edge_weight: Weight for the auxiliary Sobel edge loss.
-        line_weight: Weight for the auxiliary dark-line loss.
-        outpath: Path for periodic checkpoint saves (overwritten each time).
-            A checkpoint and a sample PNG are written at the end of every epoch.
-        eval_every: Evaluate FID every N epochs (0 = disabled).  FID is measured
-            on the epoch clock, so each score lands on the record holding the
-            loss it belongs with.
-        real_stats: Real-image Inception statistics for FID (``None`` skips FID
-            evaluation, and with it best-checkpoint tracking and early stopping).
-        early_stop_patience: Stop after this many consecutive FID evaluations
-            that degrade beyond a 1% tolerance (0 = disabled).
-        fid_n_samples: Number of generated images per FID evaluation.  FID is
-            biased in ``n``, so the value is recorded next to each score.
-        t_mu: Mean of the logit-normal timestep distribution
-            ``t = sigmoid(N(t_mu, t_sigma^2))``.  Negative values sample lower
-            ``t`` (higher noise) more often; JiT uses -0.8.
-        t_sigma: Standard deviation of the logit-normal timestep distribution.
+        cfg: Optimisation and loss hyperparameters.
 
-    Returns:
-        The trained ``ImageFM`` model.
+    Yields:
+        ``(epoch, mean_loss)`` at the end of each epoch, ``epoch`` from 0.
     """
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(init_lr),
+        optax.adam(cfg.init_lr),
     )
     optimizer_state = optimizer.init(eqx.filter(model.net_theta, eqx.is_inexact_array))
 
-    key, sample_key = jax.random.split(key)
-    sample_noise = jax.random.normal(sample_key, (1, 64, 64, 3))
-
-    global_step = 0
-
     @eqx.filter_jit
-    def make_update(key, net_theta, batch, optimizer_state):
+    def make_update(key, net_theta, batch, optimizer_state, masks=None):
         newkey, sk1, sk2 = jax.random.split(key, num=3)
         batch_size = batch.shape[0]
         # Logit-normal t (JiT, Tab. 3): mu < 0 shifts mass toward low t, i.e.
         # high noise, where the modelling is hard; the thin tail at t -> 1
         # also balances the 1/(1-t)^2 loss weight there.
-        t = jax.nn.sigmoid(t_mu + t_sigma * jax.random.normal(sk1, (batch_size,)))
+        t = jax.nn.sigmoid(
+            cfg.t_mu + cfg.t_sigma * jax.random.normal(sk1, (batch_size,))
+        )
         rand_input = jax.random.normal(sk2, shape=batch.shape)
         loss, grad = eqx.filter_value_and_grad(ImageFM.train_step)(
             net_theta,
             t,
             rand_input,
             batch,
-            edge_weight,
-            line_weight,
+            cfg.edge_weight,
+            cfg.line_weight,
             model.denom_floor,
+            masks,
+            cfg.aux_weight,
         )
         updates, optimizer_state = optimizer.update(grad, optimizer_state)
         net_theta = eqx.apply_updates(net_theta, updates)
         return newkey, net_theta, optimizer_state, loss
 
-    history = []
-    best_fid = float("inf")
-    fid_patience = 0
-    net_loss = 0
-    count = 0
-
     # The dataset is endless, so the step budget is what ends the run and epoch
     # boundaries fall out of the step counter.
-    total_steps = n_epochs * batches_per_epoch
-    batches = zip(range(total_steps), dataset)
-
-    for _, batch in (pbar := tqdm(desc="run", iterable=batches, total=total_steps)):
+    total_steps = cfg.n_epochs * batches_per_epoch
+    net_loss = 0.0
+    for step, batch in zip(range(1, total_steps + 1), dataset):
+        masks = None
+        if isinstance(batch, tuple):
+            batch, masks = batch
         key, model.net_theta, optimizer_state, loss = make_update(
-            key,
-            model.net_theta,
-            batch,
-            optimizer_state,
+            key, model.net_theta, batch, optimizer_state, masks
         )
-        global_step += 1
-        net_loss += loss
-        count += 1
-
-        if global_step % batches_per_epoch:
-            continue
-
-        # End of an epoch: everything periodic happens here, on one clock.
-        epoch = global_step // batches_per_epoch - 1
-        record = {"epoch": epoch, "loss": float(net_loss / count)}
-        net_loss = 0
-        count = 0
-        history.append(record)
-        pbar.set_postfix({"loss": f"{record['loss']:.4f}", "step": global_step})
-
-        if outpath is None:
-            continue
-        outdir = Path(outpath).parent
-        model.save(outpath)
-        _save_sample(model, outdir, sample_noise, epoch)
-
-        if real_stats is not None and eval_every and (epoch + 1) % eval_every == 0:
-            key, eval_key = jax.random.split(key)
-            fid = evaluate_fid(model, real_stats, eval_key, n_samples=fid_n_samples)
-            print(f"\nEpoch {epoch}: FID = {fid:.2f}", flush=True)
-            record["fid"] = round(fid, 2)
-            record["fid_n_samples"] = fid_n_samples
-
-            if fid < best_fid * 1.01:
-                if fid < best_fid:
-                    best_fid = fid
-                    model.save(str(outdir / "best_model.eqx"))
-                fid_patience = 0
-            else:
-                fid_patience += 1
-                print(f"  FID degradation {fid_patience}/{early_stop_patience}")
-
-        with (outdir / "losses.json").open("w") as f:
-            json.dump(history, f, indent=2)
-
-        if early_stop_patience > 0 and fid_patience >= early_stop_patience:
-            print(f"Early stopping at epoch {epoch}: best FID {best_fid:.2f}")
-            return model
-
-    return model
+        net_loss += float(loss)
+        if step % batches_per_epoch == 0:
+            yield step // batches_per_epoch - 1, net_loss / batches_per_epoch
+            net_loss = 0.0

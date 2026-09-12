@@ -27,9 +27,6 @@ rcParams.update(
 
 
 def _load_model(model_path: str) -> ImageFM:
-    with open(model_path + ".hparams") as f:
-        hparams = json.load(f)
-
     def skeleton(key, **hp):
         return UNet(**hp, key=key)
 
@@ -37,7 +34,8 @@ def _load_model(model_path: str) -> ImageFM:
 
 
 def plot_loss_curve(losses_path: str, output_path: str):
-    with open(losses_path) as f:
+    """Plot per-epoch training loss from ``losses.json`` on a log axis."""
+    with Path(losses_path).open() as f:
         history = json.load(f)
     epochs = [h["epoch"] for h in history]
     losses = [h["loss"] for h in history]
@@ -54,7 +52,8 @@ def plot_loss_curve(losses_path: str, output_path: str):
 
 
 def plot_fid_curve(losses_path: str, output_path: str):
-    with open(losses_path) as f:
+    """Plot FID over epochs from ``losses.json``, marking the best score."""
+    with Path(losses_path).open() as f:
         history = json.load(f)
     fid_entries = [(h["epoch"], h["fid"]) for h in history if "fid" in h]
     if not fid_entries:
@@ -83,6 +82,7 @@ def plot_fid_curve(losses_path: str, output_path: str):
 def generate_sample_grid(
     model_path: str, output_path: str, n_row: int = 4, n_col: int = 4
 ):
+    """Generate an ``n_row x n_col`` grid of samples from fixed-seed noise."""
     model = _load_model(model_path)
     key = jax.random.key(42)
     key, sk = jax.random.split(key)
@@ -99,6 +99,7 @@ def generate_sample_grid(
 
 
 def generate_interpolation(model_path: str, output_path: str, n_steps: int = 10):
+    """Generate images along a linear interpolation between two latent noises."""
     model = _load_model(model_path)
     key = jax.random.key(42)
     sk1, sk2 = jax.random.split(key)
@@ -121,6 +122,7 @@ def generate_interpolation(model_path: str, output_path: str, n_steps: int = 10)
 
 
 def compare_real_vs_generated(model_path: str, output_path: str, n: int = 8):
+    """Show ``n`` random real images above ``n`` generated ones."""
     arr = preprocess_all("./data/anime-faces")
     idx = np.random.RandomState(0).choice(len(arr), n, replace=False)
     real_imgs = to_uint8(arr[idx])

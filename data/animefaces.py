@@ -107,18 +107,45 @@ def preprocess_all(
     return raw
 
 
+def load_masks(path: str = "./.preprocessed/anime_faces_masks.npy") -> np.ndarray:
+    """Load cached semantic masks aligned index-for-index with ``preprocess_all``.
+
+    The masks are produced offline from ``hysts/anime-face-detector`` landmarks
+    (face hull, eyes, mouth) and stored as ``uint8`` in ``[0, 255]``; see the
+    README section on auxiliary supervision for the generating script.  They
+    are returned as-is and rescaled to ``[0, 1]`` inside the pipeline.
+
+    Args:
+        path: Location of the cached ``(N, 64, 64, K)`` ``uint8`` array.
+
+    Returns:
+        The ``uint8`` mask array.
+    """
+    return np.load(path)
+
+
+Element = np.ndarray | tuple[np.ndarray, np.ndarray]
+"""A pipeline element: an image, or an ``(image, mask)`` pair."""
+
+
 class RandomHorizontalFlip(gt.RandomMap):
-    """Randomly flip images horizontally with probability ``p_flip``."""
+    """Randomly flip images horizontally with probability ``p_flip``.
+
+    An ``(image, mask)`` pair is flipped as one so the mask stays aligned.
+    """
 
     def __init__(self, p_flip: float = 0.5):
         """Store the per-image flip probability."""
         self.p_flip = p_flip
 
-    def random_map(self, image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        """Mirror ``image`` about its width axis with probability ``p_flip``."""
-        if rng.random() < self.p_flip:
-            return np.flip(image, axis=1)
-        return image
+    def random_map(self, element: Element, rng: np.random.Generator) -> Element:
+        """Mirror ``element`` about its width axis with probability ``p_flip``."""
+        if rng.random() >= self.p_flip:
+            return element
+        if isinstance(element, tuple):
+            image, mask = element
+            return np.flip(image, axis=1), np.flip(mask, axis=1)
+        return np.flip(element, axis=1)
 
 
 class ColorJitter(gt.RandomMap):
@@ -135,8 +162,17 @@ class ColorJitter(gt.RandomMap):
         self.contrast_range = contrast_range
         self.saturation_range = saturation_range
 
-    def random_map(self, image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-        """Apply one random brightness, contrast and saturation draw to ``image``."""
+    def random_map(self, element: Element, rng: np.random.Generator) -> Element:
+        """Apply one random brightness, contrast and saturation draw to the image.
+
+        A mask riding along in an ``(image, mask)`` pair is passed through.
+        """
+        if isinstance(element, tuple):
+            image, mask = element
+            return self._jitter(image, rng), mask
+        return self._jitter(element, rng)
+
+    def _jitter(self, image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         b = rng.uniform(-self.brightness_max, self.brightness_max)
         c = rng.uniform(*self.contrast_range)
         s = rng.uniform(*self.saturation_range)
@@ -152,6 +188,7 @@ class ColorJitter(gt.RandomMap):
 
 def wrap_dataset(
     array_or_dir: str | np.ndarray,
+    masks: np.ndarray | None = None,
     pconfig: PreprocessingConfig = PreprocessingConfig(),
     aug_config: AugmentationConfig = AugmentationConfig(),
     seed: int = 42,
@@ -172,6 +209,9 @@ def wrap_dataset(
     Args:
         array_or_dir: Either a path to a dataset directory (str) or a preprocessed
             numpy array. If a string, ``preprocess_all`` is called internally.
+        masks: Optional ``(N, H, W, K)`` ``uint8`` masks (see ``load_masks``).
+            When given, the stream yields ``(images, masks)`` batch pairs with
+            the masks in ``[0, 1]`` and augmented in lockstep with the images.
         pconfig: Preprocessing configuration (loading / caching).
         aug_config: Online augmentation configuration.
         seed: Seed for shuffling and random augmentations.
@@ -179,21 +219,40 @@ def wrap_dataset(
 
     Returns:
         ``(dataset, batches_per_epoch)``: an endless grain ``IterDataset`` of
-        batches, and the number of batches making up one pass over the data.
+        batches (or batch pairs), and the number of batches making up one pass
+        over the data.
     """
     if isinstance(array_or_dir, str):
         arr = preprocess_all(array_or_dir)
     else:
         arr = array_or_dir
 
+    if masks is None:
+        # ndarray satisfies Grain's RandomAccessDataSource protocol (__len__ and
+        # __getitem__) but is not typed as one.
+        source: grain.MapDataset = grain.MapDataset.source(arr)  # ty: ignore[invalid-argument-type]
+
+        def batch_fn(x_ls):
+            return np.stack(x_ls, axis=0)
+    else:
+        if len(masks) != len(arr):
+            raise ValueError(f"{len(masks)} masks for {len(arr)} images")
+        # Pair by index so that shuffling permutes images and masks together.
+        source = grain.MapDataset.source(range(len(arr))).map(
+            lambda i: (arr[i], masks[i].astype(np.float32) / 255.0)
+        )
+
+        def batch_fn(x_ls):
+            images, mask_ls = zip(*x_ls)
+            return np.stack(images, axis=0), np.stack(mask_ls, axis=0)
+
     # Independent streams: reusing one integer for both would tie the batch
     # composition to the augmentation draws for an element.
     prng = random.Random(seed)
     shuffle_seed = prng.getrandbits(32)
     augment_seed = prng.getrandbits(32)
-    dataset: grain.MapDataset = (
-        grain.MapDataset.source(arr)
-        .seed(augment_seed)
+    dataset = (
+        source.seed(augment_seed)
         .shuffle(shuffle_seed)
         .repeat()
         .random_map(RandomHorizontalFlip(p_flip=aug_config.p_flip))
@@ -204,7 +263,7 @@ def wrap_dataset(
                 saturation_range=aug_config.saturation_range,
             )
         )
-        .batch(batch_size=batch_size, batch_fn=lambda x_ls: np.stack(x_ls, axis=0))
+        .batch(batch_size=batch_size, batch_fn=batch_fn)
     )
     # Ceiling division: the stream is continuous, so batches straddle epoch
     # boundaries rather than a short batch ending each pass.

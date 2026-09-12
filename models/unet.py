@@ -83,11 +83,7 @@ class ResBlock(eqx.Module):
             out_features=out_channels * 2,
             key=sk3,
         )
-        self.ada_proj = eqx.tree_at(
-            lambda m: (m.weight, m.bias),
-            ada,
-            (jax.numpy.zeros_like(ada.weight), jax.numpy.zeros_like(ada.bias)),
-        )
+        self.ada_proj = jax.tree.map(jax.numpy.zeros_like, ada)
 
         self.skip_proj = (
             eqx.nn.Conv2d(
@@ -149,6 +145,7 @@ class UBlock(eqx.Module):
     """
 
     # TODO(n): Check if current skip connection pattern is detrimental to performance.
+    #          https://github.com/nikhilr612/tinyflow/issues/16
     #          Switch over to proper skip connections.
 
     down_res_block: ResBlock
@@ -244,13 +241,29 @@ class UNet(eqx.Module):
     Comprises of a fixed number of `UBlocks` applied recursively.
     Input channels are expanded using a preliminary convolution.
     Output is collapsed to the same shape as input via pointwise convolution.
+
+    Optional auxiliary head (``n_aux_classes > 0``):
+        A pointwise MLP reading the *encoder* feature map after ``aux_level``
+        downsamplings and emitting ``n_aux_classes`` logit maps at that
+        resolution.  It is used only by ``forward_aux`` during training, to
+        supervise the encoder with semantic masks of the clean image (face,
+        eyes, ...) while the input is the noisy ``x_t``.  This is the U-Net
+        analogue of REPA (Yu et al. 2025): the hidden state of a noisy input
+        is pushed toward semantics of the clean target, which the denoising
+        objective alone only discovers slowly.  The head is tapped on the
+        encoder rather than the decoder because decoder features sit next to
+        the reconstruction and would carry the masks for free; the point is
+        to shape the representation, not to read it out.  ``__call__`` never
+        touches the head, so sampling is unchanged.
     """
 
     in_conv: eqx.nn.Conv2d
     blocks: list[UBlock]
     out_conv: eqx.nn.Conv2d
     time_mlp: eqx.nn.Sequential
+    aux_head: eqx.nn.Sequential | None
     time_embedding_dim: int
+    aux_level: int = eqx.field(static=True)
     time_scale: float = eqx.field(static=True)
 
     def __init__(
@@ -260,6 +273,8 @@ class UNet(eqx.Module):
         key: PRNGKeyArray,
         n_blocks: int = 4,
         in_channels: int = 3,
+        n_aux_classes: int = 0,
+        aux_level: int = 2,
         time_scale: float = 1000.0,
     ):
         """Initialize a denoising U-Net with multiple blocks conditioned on time.
@@ -270,6 +285,11 @@ class UNet(eqx.Module):
             n_blocks: The number of blocks
             key: PRNG key for random initialization
             time_embedding_dim: The size of 1d time embedding.
+            n_aux_classes: Number of semantic mask channels predicted by the
+                auxiliary head; ``0`` disables the head (see class docstring).
+            aux_level: Number of downsamplings between the input and the
+                feature map the auxiliary head reads.  ``n_blocks`` selects the
+                bottleneck.
             time_scale: Multiplier taking ``t`` from ``[0, 1]`` into the range
                 the sinusoidal frequencies were designed for (DDPM's 1000 steps).
                 Not an ``hparam``: ``ImageFM.load`` coerces those with ``int()``.
@@ -291,6 +311,21 @@ class UNet(eqx.Module):
             sk, key = jax.random.split(key)
             self.blocks.append(UBlock(base_channels * 2**i, time_embedding_dim, sk))
 
+        if not 0 <= aux_level <= n_blocks:
+            raise ValueError(f"aux_level={aux_level} must be in [0, {n_blocks}]")
+        self.aux_level = aux_level
+        self.aux_head = None
+        if n_aux_classes > 0:
+            sk5, sk6 = jax.random.split(key)
+            c_aux = base_channels * 2**aux_level
+            self.aux_head = eqx.nn.Sequential(
+                [
+                    eqx.nn.Conv2d(c_aux, c_aux, 1, key=sk5),
+                    eqx.nn.Lambda(jax.nn.silu),
+                    eqx.nn.Conv2d(c_aux, n_aux_classes, 1, key=sk6),
+                ]
+            )
+
     def sinusoidal_embeddings(self, t: Float[Array, ""]) -> Float[Array, " Tembed"]:
         """Sinusoidal embeddings for a given scalar time `t`.
 
@@ -307,13 +342,13 @@ class UNet(eqx.Module):
         )
         return jax.numpy.concat([jax.numpy.sin(freqs), jax.numpy.cos(freqs)])
 
-    @jaxtyped(typechecker=beartype)
-    def __call__(
+    def _forward(
         self, x: Float[Array, " H W C"], t: Float[Array, ""]
-    ) -> Float[Array, " H W C"]:
-        """Forward an image to denoise through the U-net.
+    ) -> tuple[Float[Array, " C H W"], list[Array]]:
+        """Run the U-Net; return the channels-first output and encoder features.
 
-        Denoise an image `x`, at timestep `t`.
+        The feature list holds the input to each down block followed by the
+        bottleneck, i.e. entry ``i`` has been downsampled ``i`` times.
         """
         t_embed = self.time_mlp(self.sinusoidal_embeddings(t))
         x_c = rearrange(x, "h w c -> c h w")
@@ -325,7 +360,32 @@ class UNet(eqx.Module):
         x_out = x_in
         for i in range(len(self.blocks) - 1, -1, -1):
             x_out = self.blocks[i].up(x_out, skip_values[i], t_embed)
-        x_out = self.out_conv(x_out)
+        return self.out_conv(x_out), [*skip_values, x_in]
+
+    @jaxtyped(typechecker=beartype)
+    def forward_aux(
+        self, x: Float[Array, " H W C"], t: Float[Array, ""]
+    ) -> tuple[Float[Array, " H W C"], Float[Array, " h w K"]]:
+        """Denoise `x` at time `t` and also emit the auxiliary mask logits.
+
+        Training-only companion to ``__call__``; requires ``n_aux_classes > 0``.
+        The logits are at ``1 / 2**aux_level`` of the input resolution.
+        """
+        if self.aux_head is None:
+            raise ValueError("forward_aux needs a UNet built with n_aux_classes > 0")
+        x_out, feats = self._forward(x, t)
+        logits = self.aux_head(feats[self.aux_level])
+        return rearrange(x_out, "c h w -> h w c"), rearrange(logits, "k h w -> h w k")
+
+    @jaxtyped(typechecker=beartype)
+    def __call__(
+        self, x: Float[Array, " H W C"], t: Float[Array, ""]
+    ) -> Float[Array, " H W C"]:
+        """Forward an image to denoise through the U-net.
+
+        Denoise an image `x`, at timestep `t`.
+        """
+        x_out, _feats = self._forward(x, t)
         #
         # It appears that a reasonable number of papers dealing with
         # pixel-space generative modelling omit the final bounded activation
