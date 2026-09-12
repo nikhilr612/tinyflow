@@ -1,8 +1,17 @@
-"""Implement a denoising U-net for image generation via flow matching."""
+"""Implement a denoising U-net for image generation via flow matching.
 
-import beartype
+Note on data format:
+    Equinox ``Conv2d`` (and ``lax.conv_general_dilated`` in JAX 0.10+)
+    uses channels-first layout ``(C, H, W)`` for unbatched data.
+    All internal operations in this module use ``(C, H, W)`` accordingly.
+    The public interface (``UNet.__call__``) transposes to/from ``(H, W, C)``
+    so that callers supplying image data in standard ``(H, W, C)`` format
+    (e.g., ``ImageFM``) do not need to know about this internal detail.
+"""
+
 import equinox as eqx
 import jax
+from beartype import beartype
 from einops import pack, rearrange, reduce
 from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
 
@@ -18,8 +27,10 @@ class ResBlock(eqx.Module):
     conv2: eqx.nn.Conv2d
     skip_proj: eqx.nn.Conv2d | eqx.nn.Identity
     ada_proj: eqx.nn.Linear
-    n_groups: int = 8
-    gn_eps: float = 1e-5
+    gn_scale: Float[Array, " C 1 1"]
+    gn_shift: Float[Array, " C 1 1"]
+    n_groups: int = eqx.field(static=True, default=8)
+    gn_eps: float = eqx.field(static=True, default=1e-5)
 
     def __init__(
         self,
@@ -36,7 +47,16 @@ class ResBlock(eqx.Module):
             time_embedding_dim: The number of channels in time embeddings.
             key: PRNG Key used for random initialization.
         """
+        if in_channels % self.n_groups or out_channels % self.n_groups:
+            raise ValueError(
+                f"channels ({in_channels}, {out_channels}) must be divisible by "
+                f"n_groups={self.n_groups}"
+            )
         sk1, sk2, sk3, sk4 = jax.random.split(key, num=4)
+        # Affine for the first norm only; the second norm's affine is the FiLM
+        # (gamma, beta) from ada_proj.
+        self.gn_scale = jax.numpy.ones((in_channels, 1, 1))
+        self.gn_shift = jax.numpy.zeros((in_channels, 1, 1))
         self.conv1 = eqx.nn.Conv2d(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -53,10 +73,20 @@ class ResBlock(eqx.Module):
             key=sk2,
         )
 
-        self.ada_proj = eqx.nn.Linear(
+        # adaLN-Zero (Peebles & Xie 2023; the FiLM analogue of the zero-gamma
+        # trick in Wu & He 2018, Sec. 4.1): the projection starts at zero so
+        # (1 + gamma, beta) = (1, 0) and the block begins as a plain ResBlock.
+        # A default Linear would give gamma ~ U(+-1/sqrt(T_emb)), a random
+        # near-zero gate that attenuates the main path ~10x at init.
+        ada = eqx.nn.Linear(
             in_features=time_embedding_dim,
             out_features=out_channels * 2,
             key=sk3,
+        )
+        self.ada_proj = eqx.tree_at(
+            lambda m: (m.weight, m.bias),
+            ada,
+            (jax.numpy.zeros_like(ada.weight), jax.numpy.zeros_like(ada.bias)),
         )
 
         self.skip_proj = (
@@ -70,24 +100,32 @@ class ResBlock(eqx.Module):
             else eqx.nn.Identity()
         )
 
-    def _group_norm(self, x: Float[Array, " H W C"]) -> Float[Array, " H W C"]:
-        """Normalize over channel groups."""
-        grouped = rearrange(x, "h w (G g) -> G g h w", G=self.n_groups)
-        mean = reduce(grouped, "G g h w -> G g 1 1", "mean")
+    def _group_norm(self, x: Float[Array, " C H W"]) -> Float[Array, " C H W"]:
+        """Normalize over channel groups.
+
+        Statistics are taken over the ``g`` channels of each group *and* space
+        (``G g h w -> G 1 1 1``).  Keeping ``g`` in the output would give one
+        mean per channel, i.e. InstanceNorm, which strips per-image brightness
+        and colour cast -- content a generator needs to keep.
+        """
+        grouped = rearrange(x, "(G g) h w -> G g h w", G=self.n_groups)
+        mean = reduce(grouped, "G g h w -> G 1 1 1", "mean")
         shifted = grouped - mean
-        var = reduce(shifted**2, "G g h w -> G g 1 1", "mean")
+        var = reduce(shifted**2, "G g h w -> G 1 1 1", "mean")
         scaled = shifted * (1.0 / jax.lax.sqrt(var + self.gn_eps))
-        return rearrange(scaled, "G g h w -> h w (G g)")
+        return rearrange(scaled, "G g h w -> (G g) h w")
 
     @jaxtyped(typechecker=beartype)
     def __call__(
-        self, x: Float[Array, " H W C"], t_emb: Float[Array, " Temb"]
-    ) -> Float[Array, " H W C_out"]:
+        self, x: Float[Array, " C H W"], t_emb: Float[Array, " Temb"]
+    ) -> Float[Array, " C_out H W"]:
         """Forward `x` through this block, with time embeddings `t`."""
-        x_norm = self._group_norm(x)
+        x_norm = self._group_norm(x) * self.gn_scale + self.gn_shift
         h1 = self.conv1(jax.nn.silu(x_norm))
-        gamma, beta = rearrange(self.ada_proj(t_emb), "(two p) -> two () () p", two=2)
-        h2 = self._group_norm(h1) * gamma + beta
+        gamma, beta = rearrange(
+            self.ada_proj(jax.nn.silu(t_emb)), "(two p) -> two p () ()", two=2
+        )
+        h2 = self._group_norm(h1) * (1 + gamma) + beta
         y = self.conv2(jax.nn.silu(h2))
         return y + self.skip_proj(x)
 
@@ -106,7 +144,7 @@ class UBlock(eqx.Module):
     This is partly due to a misunderstanding about their original purpose.
     The "U"-skip connections in this implementation rougly circumvent one encoder block.
     Indeed, the standard Unet has a skip-connection post-encoder to pre-decoder.
-    Here, the skips are from pre-decoder to post-upsample.
+    Here, the skips are from pre-encoder to post-upsample.
     The fix is relatively straightforward;
     """
 
@@ -167,8 +205,8 @@ class UBlock(eqx.Module):
 
     @jaxtyped(typechecker=beartype)
     def down(
-        self, x: Float[Array, " H W C"], t_emb: Float[Array, " Temb"]
-    ) -> Float[Array, " H_out W_out C_out"]:
+        self, x: Float[Array, " C H W"], t_emb: Float[Array, " Temb"]
+    ) -> Float[Array, " C_out H_out W_out"]:
         """Forward data through the block, with downsampling.
 
         Pass `x` through a res block which increases channels.
@@ -180,23 +218,23 @@ class UBlock(eqx.Module):
     @jaxtyped(typechecker=beartype)
     def up(
         self,
-        x: Float[Array, " H W C_in"],  # C_in should be 2 * C_skip
-        x_skip: Float[Array, " H_out W_out C_skip"],
+        x: Float[Array, " C_in H W"],
+        x_skip: Float[Array, " C_skip H_out W_out"],
         t_emb: Float[Array, " Temb"],
-    ) -> Float[Array, " H_out W_out C_out"]:
+    ) -> Float[Array, " C_out H_out W_out"]:
         """Forward data through the block, with upsampling.
 
         Upsample `x` using bilinear interpolation.
         Then, forward through a res block with concatenated `x_skip`.
         """
-        h, w, c_in = x.shape
+        c_in, h, w = x.shape
         x_up = jax.image.resize(
             x,
-            (h * 2, w * 2, c_in),
+            (c_in, h * 2, w * 2),
             method=jax.image.ResizeMethod.LINEAR,
         )
         x_conv = jax.nn.silu(self.up_conv(x_up))
-        concatenated_skip, _packing = pack([x_conv, x_skip], "h w *")
+        concatenated_skip, _packing = pack([x_conv, x_skip], "* h w")
         return self.up_res_block(concatenated_skip, t_emb)
 
 
@@ -211,7 +249,9 @@ class UNet(eqx.Module):
     in_conv: eqx.nn.Conv2d
     blocks: list[UBlock]
     out_conv: eqx.nn.Conv2d
+    time_mlp: eqx.nn.Sequential
     time_embedding_dim: int
+    time_scale: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -220,6 +260,7 @@ class UNet(eqx.Module):
         key: PRNGKeyArray,
         n_blocks: int = 4,
         in_channels: int = 3,
+        time_scale: float = 1000.0,
     ):
         """Initialize a denoising U-Net with multiple blocks conditioned on time.
 
@@ -229,19 +270,41 @@ class UNet(eqx.Module):
             n_blocks: The number of blocks
             key: PRNG key for random initialization
             time_embedding_dim: The size of 1d time embedding.
+            time_scale: Multiplier taking ``t`` from ``[0, 1]`` into the range
+                the sinusoidal frequencies were designed for (DDPM's 1000 steps).
+                Not an ``hparam``: ``ImageFM.load`` coerces those with ``int()``.
         """
-        sk1, sk2, key = jax.random.split(key, num=3)
+        sk1, sk2, sk3, sk4, key = jax.random.split(key, num=5)
         self.in_conv = eqx.nn.Conv2d(in_channels, base_channels, 3, padding=1, key=sk1)
         self.out_conv = eqx.nn.Conv2d(base_channels, in_channels, 1, key=sk2)
+        self.time_mlp = eqx.nn.Sequential(
+            [
+                eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk3),
+                eqx.nn.Lambda(jax.nn.silu),
+                eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk4),
+            ]
+        )
         self.blocks = []
         self.time_embedding_dim = time_embedding_dim
+        self.time_scale = time_scale
         for i in range(n_blocks):
             sk, key = jax.random.split(key)
             self.blocks.append(UBlock(base_channels * 2**i, time_embedding_dim, sk))
 
     def sinusoidal_embeddings(self, t: Float[Array, ""]) -> Float[Array, " Tembed"]:
-        """Sinusoidal embeddings for a given scalar time `t`."""
-        freqs = t * jax.numpy.geomspace(1, 1 / 10_000, num=self.time_embedding_dim // 2)
+        """Sinusoidal embeddings for a given scalar time `t`.
+
+        The frequencies follow the transformer/DDPM convention, spanning
+        ``1 .. 1e-4``, which presumes an integer-scale position.  ``t`` here is in
+        ``[0, 1]``, so without ``time_scale`` no frequency would complete even a
+        fraction of a cycle and the embedding would be a near-constant function
+        of ``t``.  Scaled, the fastest component oscillates ~160 times across the
+        unit interval and the slowest ~0.016 times, giving both fine and coarse
+        resolution in ``t``.
+        """
+        freqs = (self.time_scale * t) * jax.numpy.geomspace(
+            1, 1 / 10_000, num=self.time_embedding_dim // 2
+        )
         return jax.numpy.concat([jax.numpy.sin(freqs), jax.numpy.cos(freqs)])
 
     @jaxtyped(typechecker=beartype)
@@ -252,8 +315,9 @@ class UNet(eqx.Module):
 
         Denoise an image `x`, at timestep `t`.
         """
-        t_embed = self.sinusoidal_embeddings(t)
-        x_in = self.in_conv(x)
+        t_embed = self.time_mlp(self.sinusoidal_embeddings(t))
+        x_c = rearrange(x, "h w c -> c h w")
+        x_in = self.in_conv(x_c)
         skip_values: list[Array] = []
         for i in range(len(self.blocks)):
             skip_values.append(x_in)
@@ -261,6 +325,7 @@ class UNet(eqx.Module):
         x_out = x_in
         for i in range(len(self.blocks) - 1, -1, -1):
             x_out = self.blocks[i].up(x_out, skip_values[i], t_embed)
+        x_out = self.out_conv(x_out)
         #
         # It appears that a reasonable number of papers dealing with
         # pixel-space generative modelling omit the final bounded activation
@@ -278,4 +343,4 @@ class UNet(eqx.Module):
         # and the fact that the dervied velocity field is still unbounded,
         # The final activation is omitted here.
         #
-        return self.out_conv(x_out)
+        return rearrange(x_out, "c h w -> h w c")
