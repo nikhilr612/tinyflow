@@ -218,3 +218,9 @@ ztserver.py
 
 # loss-map inspection dumps
 .inspect/
+
+# preprocessed dataset + Inception statistics caches
+.preprocessed/
+
+# fidax Inception weights (downloaded)
+data/inception_v3_weights_fid.pickle
