@@ -212,3 +212,9 @@ runs/
 # datasets
 data/*/
 .hfcache/*
+
+# local-only helper
+ztserver.py
+
+# loss-map inspection dumps
+.inspect/
