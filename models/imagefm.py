@@ -347,7 +347,16 @@ class TrainConfig:
 
     Attributes:
         n_epochs: Number of full passes over the dataset.
-        init_lr: Learning rate for Adam.
+        init_lr: Peak learning rate for Adam.
+        warmup_steps: Linear warm-up from 0 to ``init_lr`` over this many
+            steps, then cosine decay to ``init_lr * lr_end_frac`` at the last
+            step (``optax.warmup_cosine_decay_schedule``).  ``0`` with
+            ``lr_end_frac = 1`` is a constant learning rate.  A constant 1e-3
+            was found to be at the edge of stability for the 37M model: three
+            runs with added modules diverged in a single epoch (loss x3.6,
+            samples destroyed) after tens of epochs of steady descent
+            (experiments/METHODS.md, sections 6-7).
+        lr_end_frac: Final learning rate as a fraction of ``init_lr``.
         t_mu: Mean of the logit-normal timestep distribution
             ``t = sigmoid(N(t_mu, t_sigma^2))``.  Negative values sample lower
             ``t`` (higher noise) more often; JiT uses -0.8.
@@ -372,6 +381,8 @@ class TrainConfig:
 
     n_epochs: int = 100
     init_lr: float = 1e-3
+    warmup_steps: int = 500
+    lr_end_frac: float = 0.01
     cond_channels: int = 0
     cond_dropout: float = 0.0
     t_mu: float = -0.8
@@ -408,9 +419,18 @@ def train_on_image(
     Yields:
         ``(epoch, mean_loss)`` at the end of each epoch, ``epoch`` from 0.
     """
+    total_steps = cfg.n_epochs * batches_per_epoch
+    warmup = min(cfg.warmup_steps, total_steps // 10)  # short runs: at most 10 %
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0 if warmup else cfg.init_lr,
+        peak_value=cfg.init_lr,
+        warmup_steps=warmup,
+        decay_steps=total_steps,
+        end_value=cfg.init_lr * cfg.lr_end_frac,
+    )
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adam(cfg.init_lr),
+        optax.adam(schedule),
     )
     optimizer_state = optimizer.init(eqx.filter(model.net_theta, eqx.is_inexact_array))
 
@@ -470,7 +490,6 @@ def train_on_image(
 
     # The dataset is endless, so the step budget is what ends the run and epoch
     # boundaries fall out of the step counter.
-    total_steps = cfg.n_epochs * batches_per_epoch
     net_theta = ema_theta = model.net_theta
     net_loss = 0.0
     for step, batch in zip(range(1, total_steps + 1), dataset):

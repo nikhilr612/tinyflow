@@ -63,7 +63,10 @@ def anime(
     early_stop_patience: int = 3,
     n_steps: int = 64,
     init_lr: float = 1e-3,
+    warmup_steps: int = 500,
+    lr_end_frac: float = 0.01,
     ema_decay: float = 0.999,
+    init_from: str = "",
     min_landmark_score: float = 0.3,
     cond_channels: int = 0,
     cond_dropout: float = 0.0,
@@ -82,7 +85,10 @@ def anime(
     real image enters generation.  ``--min-landmark-score`` drops
     detector-rejected non-faces from training (the FID reference stays the
     full set).  ``--fid-n-steps`` is the sampler length for training-time FID
-    only; 16 Dopri5 steps score within 0.5 FID of 64 on this data.
+    only; 16 Dopri5 steps score within 0.5 FID of 64 on this data.  The
+    learning rate warms up linearly and decays with a cosine
+    (``--warmup-steps``, ``--lr-end-frac``).  ``--init-from CKPT`` starts
+    from a saved model's weights (same architecture) with a fresh optimiser.
     """
     assert base_channels % 8 == 0, (
         f"base_channels={base_channels} must be divisible by 8"
@@ -124,6 +130,12 @@ def anime(
     key, sk1 = jax.random.split(key)
     unet = UNet(key=sk1, **hparams)
     model = ImageFM(unet, hparams=hparams, n_steps=n_steps)
+    if init_from:
+        loaded = ImageFM.load(init_from, UNet.from_hparams)
+        if loaded.hparams != hparams:
+            raise ValueError(f"--init-from architecture {loaded.hparams} != {hparams}")
+        model.net_theta = loaded.net_theta
+        print(f"initialised from {init_from}")
     training.run(
         key,
         model,
@@ -132,6 +144,8 @@ def anime(
         TrainConfig(
             n_epochs=n_epochs,
             init_lr=init_lr,
+            warmup_steps=warmup_steps,
+            lr_end_frac=lr_end_frac,
             ema_decay=ema_decay,
             cond_channels=cond_channels,
             cond_dropout=cond_dropout,
