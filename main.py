@@ -9,7 +9,13 @@ import data.animefaces
 import data.toycardioid
 import models.toyfm as toyfm
 import training
-from data.animefaces import load_masks, preprocess_all
+from data.animefaces import (
+    curated_indices,
+    load_landmark_scores,
+    load_masks,
+    preprocess_all,
+)
+from data.layouts import LayoutPrior
 from metrics import compute_real_stats
 from models import ToyFM
 from models.imagefm import ImageFM, TrainConfig
@@ -56,16 +62,27 @@ def anime(
     eval_every: int = 5,
     early_stop_patience: int = 3,
     n_steps: int = 64,
-    edge_weight: float = 0.1,
-    line_weight: float = 0.0,
-    aux_weight: float = 0.0,
-    aux_level: int = 2,
+    init_lr: float = 1e-3,
+    ema_decay: float = 0.999,
+    min_landmark_score: float = 0.3,
+    cond_channels: int = 0,
+    cond_dropout: float = 0.0,
+    region_pool: int = 0,
     mask_path: str = "./.preprocessed/anime_faces_masks.npy",
+    fid_batch_size: int = 256,
+    fid_n_steps: int = 16,
 ):
     """Train a flow matching model on the anime faces dataset.
 
-    ``--aux-weight > 0`` adds the auxiliary semantic-mask head (see ``UNet``)
-    supervised by the cached masks at ``--mask-path``.
+    ``--cond-channels 3`` conditions the model on the cached layout masks at
+    ``--mask-path`` (face, eyes, mouth); ``--region-pool 1`` adds the
+    mask-guided region-pooling layers that make both irises render from one
+    shared feature.  A conditioned model is evaluated (sample PNGs, FID) with
+    layouts drawn from the prior at ``.preprocessed/landmark_prior.npz``, so no
+    real image enters generation.  ``--min-landmark-score`` drops
+    detector-rejected non-faces from training (the FID reference stays the
+    full set).  ``--fid-n-steps`` is the sampler length for training-time FID
+    only; 16 Dopri5 steps score within 0.5 FID of 64 on this data.
     """
     assert base_channels % 8 == 0, (
         f"base_channels={base_channels} must be divisible by 8"
@@ -77,17 +94,31 @@ def anime(
     arr = preprocess_all("./data/anime-faces")
     real_stats = compute_real_stats(arr, batch_size=batch_size)
 
-    masks = load_masks(mask_path) if aux_weight > 0 else None
+    masks = load_masks(mask_path) if cond_channels > 0 else None
+    if min_landmark_score > 0:
+        # Drop detector-rejected non-faces from *training* only; the FID
+        # reference stays the full set so scores remain comparable across runs.
+        keep = curated_indices(load_landmark_scores(), min_landmark_score)
+        print(f"curation: keeping {len(keep)} of {len(arr)} images")
+        arr = arr[keep]
+        masks = None if masks is None else masks[keep]
     dataset, batches_per_epoch = data.animefaces.wrap_dataset(
         arr, masks, batch_size=batch_size, seed=seed
     )
+    eval_masks = None
+    if cond_channels > 0:
+        eval_masks = LayoutPrior.load().sample_masks(5000, seed=seed)[
+            ..., :cond_channels
+        ]
+
     hparams = {
         "base_channels": base_channels,
         "time_embedding_dim": time_embedding_dim,
         "n_blocks": n_blocks,
-        "in_channels": 3,
-        "n_aux_classes": 0 if masks is None else masks.shape[-1],
-        "aux_level": aux_level,
+        "in_channels": 3 + (cond_channels + 1 if cond_channels else 0),
+        "out_channels": 3,
+        "cond_channels": cond_channels,
+        "region_pool": region_pool,
     }
     key = jax.random.key(seed)
     key, sk1 = jax.random.split(key)
@@ -100,16 +131,20 @@ def anime(
         batches_per_epoch,
         TrainConfig(
             n_epochs=n_epochs,
-            edge_weight=edge_weight,
-            line_weight=line_weight,
-            aux_weight=aux_weight,
+            init_lr=init_lr,
+            ema_decay=ema_decay,
+            cond_channels=cond_channels,
+            cond_dropout=cond_dropout,
         ),
         RunConfig(
             outpath=outpath,
             eval_every=eval_every,
             early_stop_patience=early_stop_patience,
+            fid_batch_size=fid_batch_size,
+            fid_n_steps=fid_n_steps,
         ),
         real_stats=real_stats,
+        eval_masks=eval_masks,
     )
     print(f"Saved model to {outpath}")
 

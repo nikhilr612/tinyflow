@@ -16,6 +16,24 @@ from einops import pack, rearrange, reduce
 from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
 
 
+def _group_norm(
+    x: Float[Array, " C H W"], n_groups: int, eps: float
+) -> Float[Array, " C H W"]:
+    """Normalize over channel groups (no affine; callers apply their own).
+
+    Statistics are taken over the ``g`` channels of each group *and* space
+    (``G g h w -> G 1 1 1``).  Keeping ``g`` in the output would give one
+    mean per channel, i.e. InstanceNorm, which strips per-image brightness
+    and colour cast -- content a generator needs to keep.
+    """
+    grouped = rearrange(x, "(G g) h w -> G g h w", G=n_groups)
+    mean = reduce(grouped, "G g h w -> G 1 1 1", "mean")
+    shifted = grouped - mean
+    var = reduce(shifted**2, "G g h w -> G 1 1 1", "mean")
+    scaled = shifted * (1.0 / jax.lax.sqrt(var + eps))
+    return rearrange(scaled, "G g h w -> (G g) h w")
+
+
 class ResBlock(eqx.Module):
     """ResNet-inspired block.
 
@@ -97,19 +115,8 @@ class ResBlock(eqx.Module):
         )
 
     def _group_norm(self, x: Float[Array, " C H W"]) -> Float[Array, " C H W"]:
-        """Normalize over channel groups.
-
-        Statistics are taken over the ``g`` channels of each group *and* space
-        (``G g h w -> G 1 1 1``).  Keeping ``g`` in the output would give one
-        mean per channel, i.e. InstanceNorm, which strips per-image brightness
-        and colour cast -- content a generator needs to keep.
-        """
-        grouped = rearrange(x, "(G g) h w -> G g h w", G=self.n_groups)
-        mean = reduce(grouped, "G g h w -> G 1 1 1", "mean")
-        shifted = grouped - mean
-        var = reduce(shifted**2, "G g h w -> G 1 1 1", "mean")
-        scaled = shifted * (1.0 / jax.lax.sqrt(var + self.gn_eps))
-        return rearrange(scaled, "G g h w -> (G g) h w")
+        """Normalize over channel groups; see the module-level ``_group_norm``."""
+        return _group_norm(x, self.n_groups, self.gn_eps)
 
     @jaxtyped(typechecker=beartype)
     def __call__(
@@ -142,6 +149,16 @@ class UBlock(eqx.Module):
     Indeed, the standard Unet has a skip-connection post-encoder to pre-decoder.
     Here, the skips are from pre-encoder to post-upsample.
     The fix is relatively straightforward;
+
+    Traced precisely: the encoder ResBlock of level ``i`` *does* reach the
+    decoder, as the skip of level ``i + 1`` (its output is what the strided
+    conv downsamples into the next level's input).  So this pattern is the
+    standard one shifted down one level: the top decoder level receives the
+    raw ``in_conv`` features instead of a ResBlock output, and every other
+    level receives the previous level's output (``channels`` wide) instead
+    of its own (``2 * channels`` wide).  Tested (experiments/METHODS.md 6.1):
+    the standard layout is neutral at 9M parameters and needs a lower
+    learning rate at 37M; it is kept as is.
     """
 
     # TODO(n): Check if current skip connection pattern is detrimental to performance.
@@ -235,35 +252,69 @@ class UBlock(eqx.Module):
         return self.up_res_block(concatenated_skip, t_emb)
 
 
+class RegionPool(eqx.Module):
+    """Mask-guided region pooling: one shared feature per semantic region.
+
+    For every region ``k`` with soft mask ``m_k`` (``(H, W)`` in ``[0, 1]``)::
+
+        h <- h + m_k * W_k mean_{m_k}(h),    mean_m(h) = sum_p m(p) h(p) / sum_p m(p)
+
+    i.e. the features inside a region are pooled to a single vector, projected
+    by a zero-initialised 1x1 conv ``W_k`` and broadcast back into that region
+    only.  Two irises are then painted from one shared iris feature -- "the
+    eyes are one entity" stated structurally, at the resolution where hue is
+    decided -- and the same holds for hair colour across strands.  It is
+    masked attention with a single fixed query, so it is cheap, and the zero
+    init makes it the identity at initialisation.  All-zero masks (the null
+    token, or an undetected face) contribute nothing.
+    """
+
+    proj: list[eqx.nn.Conv2d]
+
+    def __init__(self, channels: int, n_regions: int, key: PRNGKeyArray):
+        """One zero-initialised ``channels -> channels`` 1x1 conv per region."""
+        self.proj = []
+        for sk in jax.random.split(key, n_regions):
+            conv = eqx.nn.Conv2d(channels, channels, kernel_size=1, key=sk)
+            self.proj.append(jax.tree.map(jax.numpy.zeros_like, conv))
+
+    @jaxtyped(typechecker=beartype)
+    def __call__(
+        self, h: Float[Array, " C H W"], masks: Float[Array, " K H W"]
+    ) -> Float[Array, " C H W"]:
+        """Add the broadcast pooled feature of every region to ``h``."""
+        for k, conv in enumerate(self.proj):
+            m = masks[k]
+            pooled = reduce(h * m, "c h w -> c 1 1", "sum") / (m.sum() + 1e-6)
+            h = h + m * conv(jax.numpy.broadcast_to(pooled, h.shape))
+        return h
+
+
 class UNet(eqx.Module):
     """Denoising UNet.
 
     Comprises of a fixed number of `UBlocks` applied recursively.
     Input channels are expanded using a preliminary convolution.
-    Output is collapsed to the same shape as input via pointwise convolution.
+    Output is collapsed with a pointwise convolution to ``out_channels``
+    (the image), which is fewer than ``in_channels`` when the input carries
+    conditioning channels.
 
-    Optional auxiliary head (``n_aux_classes > 0``):
-        A pointwise MLP reading the *encoder* feature map after ``aux_level``
-        downsamplings and emitting ``n_aux_classes`` logit maps at that
-        resolution.  It is used only by ``forward_aux`` during training, to
-        supervise the encoder with semantic masks of the clean image (face,
-        eyes, ...) while the input is the noisy ``x_t``.  This is the U-Net
-        analogue of REPA (Yu et al. 2025): the hidden state of a noisy input
-        is pushed toward semantics of the clean target, which the denoising
-        objective alone only discovers slowly.  The head is tapped on the
-        encoder rather than the decoder because decoder features sit next to
-        the reconstruction and would carry the masks for free; the point is
-        to shape the representation, not to read it out.  ``__call__`` never
-        touches the head, so sampling is unchanged.
+    Layout conditioning (``cond_channels > 0``):
+        ``ImageFM`` concatenates ``cond_channels`` semantic-mask channels plus
+        one indicator channel to the image (see ``imagefm.cond_token``); the
+        U-Net only sees a wider input.  ``region_pool`` adds mask-guided
+        ``RegionPool`` layers in the decoder, which read those mask channels
+        straight from the input (experiments/METHODS.md, section 7.3: this is
+        what fixes left/right iris colour agreement).
     """
 
     in_conv: eqx.nn.Conv2d
     blocks: list[UBlock]
     out_conv: eqx.nn.Conv2d
     time_mlp: eqx.nn.Sequential
-    aux_head: eqx.nn.Sequential | None
+    region_pools: dict[int, RegionPool]
+    cond_channels: int = eqx.field(static=True)
     time_embedding_dim: int
-    aux_level: int = eqx.field(static=True)
     time_scale: float = eqx.field(static=True)
 
     def __init__(
@@ -273,58 +324,94 @@ class UNet(eqx.Module):
         key: PRNGKeyArray,
         n_blocks: int = 4,
         in_channels: int = 3,
-        n_aux_classes: int = 0,
-        aux_level: int = 2,
+        out_channels: int = 0,
+        cond_channels: int = 0,
+        region_pool: int = 0,
         time_scale: float = 1000.0,
     ):
         """Initialize a denoising U-Net with multiple blocks conditioned on time.
 
         Args:
             base_channels: The number of input channels to the first down block.
-            in_channels: The number of input channels to this UNet module.
-            n_blocks: The number of blocks
-            key: PRNG key for random initialization
             time_embedding_dim: The size of 1d time embedding.
-            n_aux_classes: Number of semantic mask channels predicted by the
-                auxiliary head; ``0`` disables the head (see class docstring).
-            aux_level: Number of downsamplings between the input and the
-                feature map the auxiliary head reads.  ``n_blocks`` selects the
-                bottleneck.
-            time_scale: Multiplier taking ``t`` from ``[0, 1]`` into the range
-                the sinusoidal frequencies were designed for (DDPM's 1000 steps).
-                Not an ``hparam``: ``ImageFM.load`` coerces those with ``int()``.
+            key: PRNG key for random initialization
+            n_blocks: The number of blocks
+            in_channels: Channels of the network input: the image plus, for a
+                conditioned model, ``cond_channels + 1`` conditioning channels.
+            out_channels: Output channels; ``0`` means the same as
+                ``in_channels``.
+            cond_channels: Number of layout-mask channels in the input (after
+                the image).  Accepted so it can live in the shared ``hparams``
+                dict; checked against ``in_channels - out_channels - 1`` and
+                used by ``region_pool``.
+            region_pool: ``1`` adds ``RegionPool`` layers after the up blocks
+                that produce 16x16 and 32x32 features, using the layout masks
+                in the conditioning channels (regions: face, eyes, mouth, and
+                hair/background = 1 - face).  Needs ``cond_channels = 3``.
+                Identity at init.  ``0`` leaves it out.
+            time_scale: Multiplier applied to ``t`` before the sinusoidal
+                embedding; see ``sinusoidal_embeddings``.
         """
-        sk1, sk2, sk3, sk4, key = jax.random.split(key, num=5)
+        n_out = out_channels or in_channels
+        if cond_channels and in_channels != n_out + cond_channels + 1:
+            raise ValueError(
+                f"in_channels={in_channels} must equal out_channels + cond_channels + 1"
+                f" = {n_out + cond_channels + 1}"
+            )
+        sk1, sk2, key = jax.random.split(key, num=3)
         self.in_conv = eqx.nn.Conv2d(in_channels, base_channels, 3, padding=1, key=sk1)
-        self.out_conv = eqx.nn.Conv2d(base_channels, in_channels, 1, key=sk2)
+        self.out_conv = eqx.nn.Conv2d(base_channels, n_out, 1, key=sk2)
+        self.time_embedding_dim = time_embedding_dim
         self.time_mlp = eqx.nn.Sequential(
             [
-                eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk3),
+                eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk1),
                 eqx.nn.Lambda(jax.nn.silu),
-                eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk4),
+                eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk2),
             ]
         )
         self.blocks = []
-        self.time_embedding_dim = time_embedding_dim
         self.time_scale = time_scale
-        for i in range(n_blocks):
+        for _ in range(n_blocks):
             sk, key = jax.random.split(key)
-            self.blocks.append(UBlock(base_channels * 2**i, time_embedding_dim, sk))
-
-        if not 0 <= aux_level <= n_blocks:
-            raise ValueError(f"aux_level={aux_level} must be in [0, {n_blocks}]")
-        self.aux_level = aux_level
-        self.aux_head = None
-        if n_aux_classes > 0:
-            sk5, sk6 = jax.random.split(key)
-            c_aux = base_channels * 2**aux_level
-            self.aux_head = eqx.nn.Sequential(
-                [
-                    eqx.nn.Conv2d(c_aux, c_aux, 1, key=sk5),
-                    eqx.nn.Lambda(jax.nn.silu),
-                    eqx.nn.Conv2d(c_aux, n_aux_classes, 1, key=sk6),
-                ]
+            self.blocks.append(
+                UBlock(base_channels * 2 ** len(self.blocks), time_embedding_dim, sk)
             )
+
+        self.cond_channels = cond_channels
+        self.region_pools = {}
+        if region_pool:
+            if cond_channels != 3:
+                raise ValueError(
+                    "region_pool needs cond_channels = 3 (face, eyes, mouth)"
+                )
+            # levels whose up block outputs 16x16 and 32x32 (64 / 2**i)
+            for level in (2, 1):
+                if level < n_blocks:
+                    sk_r, key = jax.random.split(key)
+                    self.region_pools[level] = RegionPool(
+                        base_channels * 2**level, 4, sk_r
+                    )
+
+    @classmethod
+    def from_hparams(cls, key: PRNGKeyArray, **hparams) -> "UNet":
+        """Build a skeleton from a saved ``hparams`` dict, ignoring unknown keys.
+
+        Checkpoints from the archived experiment branch carry keys for
+        options that no longer exist (``mid_block``, ``skip_mode``, ...); those
+        options were all off in the checkpoints worth loading, so dropping the
+        keys reproduces the right architecture.
+        """
+        known = {
+            "base_channels",
+            "time_embedding_dim",
+            "n_blocks",
+            "in_channels",
+            "out_channels",
+            "cond_channels",
+            "region_pool",
+            "time_scale",
+        }
+        return cls(key=key, **{k: v for k, v in hparams.items() if k in known})
 
     def sinusoidal_embeddings(self, t: Float[Array, ""]) -> Float[Array, " Tembed"]:
         """Sinusoidal embeddings for a given scalar time `t`.
@@ -344,12 +431,8 @@ class UNet(eqx.Module):
 
     def _forward(
         self, x: Float[Array, " H W C"], t: Float[Array, ""]
-    ) -> tuple[Float[Array, " C H W"], list[Array]]:
-        """Run the U-Net; return the channels-first output and encoder features.
-
-        The feature list holds the input to each down block followed by the
-        bottleneck, i.e. entry ``i`` has been downsampled ``i`` times.
-        """
+    ) -> Float[Array, " C H W"]:
+        """Run the U-Net; return the channels-first output."""
         t_embed = self.time_mlp(self.sinusoidal_embeddings(t))
         x_c = rearrange(x, "h w c -> c h w")
         x_in = self.in_conv(x_c)
@@ -358,49 +441,33 @@ class UNet(eqx.Module):
             skip_values.append(x_in)
             x_in = self.blocks[i].down(x_in, t_embed)
         x_out = x_in
+        regions = None
+        if self.region_pools:
+            # Conditioning channels sit after the image: [x_t, masks, indicator].
+            m = x_c[3 : 3 + self.cond_channels]  # (3, H, W): face, eyes, mouth
+            regions = jax.numpy.concatenate([m, 1 - m[:1]], axis=0)  # + hair/bg
         for i in range(len(self.blocks) - 1, -1, -1):
             x_out = self.blocks[i].up(x_out, skip_values[i], t_embed)
-        return self.out_conv(x_out), [*skip_values, x_in]
-
-    @jaxtyped(typechecker=beartype)
-    def forward_aux(
-        self, x: Float[Array, " H W C"], t: Float[Array, ""]
-    ) -> tuple[Float[Array, " H W C"], Float[Array, " h w K"]]:
-        """Denoise `x` at time `t` and also emit the auxiliary mask logits.
-
-        Training-only companion to ``__call__``; requires ``n_aux_classes > 0``.
-        The logits are at ``1 / 2**aux_level`` of the input resolution.
-        """
-        if self.aux_head is None:
-            raise ValueError("forward_aux needs a UNet built with n_aux_classes > 0")
-        x_out, feats = self._forward(x, t)
-        logits = self.aux_head(feats[self.aux_level])
-        return rearrange(x_out, "c h w -> h w c"), rearrange(logits, "k h w -> h w k")
+            if regions is not None and i in self.region_pools:
+                h = x_out.shape[1]
+                m_level = reduce(regions, "k (h a) (w b) -> k h w", "mean", h=h, w=h)
+                x_out = self.region_pools[i](x_out, m_level)
+        return self.out_conv(x_out)
 
     @jaxtyped(typechecker=beartype)
     def __call__(
-        self, x: Float[Array, " H W C"], t: Float[Array, ""]
-    ) -> Float[Array, " H W C"]:
+        self, x: Float[Array, " H W C_in"], t: Float[Array, ""]
+    ) -> Float[Array, " H W C_out"]:
         """Forward an image to denoise through the U-net.
 
-        Denoise an image `x`, at timestep `t`.
+        Denoise an image `x`, at timestep `t`.  ``C_in`` and ``C_out`` agree
+        for an unconditioned model; a conditioned one takes extra layout
+        channels in (``C_in = C_out + cond_channels + 1``) and emits the image.
+
+        The final bounded activation is omitted.  With the velocity field
+        parametrised through the denoised image (Li & He, 2025) the regression
+        target is unbounded either way, and a bounded output would add
+        vanishing gradients without gaining anything.
         """
-        x_out, _feats = self._forward(x, t)
-        #
-        # It appears that a reasonable number of papers dealing with
-        # pixel-space generative modelling omit the final bounded activation
-        #
-        # Presumably, this may be because of the associated vanishing gradients.
-        # In the context of Flow Matching models,
-        # the regression target is the velocity field which is unbounded.
-        # Consequently, the omission of final activation can be justified.
-        # However, the velocity field can be parametrized in terms of the denoised image
-        # as in (Li et. al, 2025). An advantage of this approach,
-        # other than it's synergy with the objectives driving the original Unet design,
-        # is the possibility of including an auxiliary perceptual loss
-        # to enhance the learning signal.
-        # Notwithstanding, owing to the bounded input, potential vanishing gradients
-        # and the fact that the dervied velocity field is still unbounded,
-        # The final activation is omitted here.
-        #
+        x_out = self._forward(x, t)
         return rearrange(x_out, "c h w -> h w c")
