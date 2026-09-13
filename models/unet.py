@@ -12,7 +12,7 @@ Note on data format:
 import equinox as eqx
 import jax
 from beartype import beartype
-from einops import pack, rearrange, reduce
+from einops import einsum, pack, rearrange, reduce
 from jaxtyping import Array, Float, PRNGKeyArray, jaxtyped
 
 
@@ -257,16 +257,20 @@ class RegionPool(eqx.Module):
 
     For every region ``k`` with soft mask ``m_k`` (``(H, W)`` in ``[0, 1]``)::
 
-        h <- h + m_k * W_k mean_{m_k}(h),    mean_m(h) = sum_p m(p) h(p) / sum_p m(p)
+        pooled_k = sum_p m_k(p) h(p) / sum_p m_k(p)          one vector per region
+        h_out    = h + sum_k m_k * (W_k pooled_k + b_k)
 
-    i.e. the features inside a region are pooled to a single vector, projected
-    by a zero-initialised 1x1 conv ``W_k`` and broadcast back into that region
+    The features inside a region are pooled to a single vector, projected by
+    a zero-initialised ``1x1`` conv ``W_k`` and broadcast back into that region
     only.  Two irises are then painted from one shared iris feature -- "the
     eyes are one entity" stated structurally, at the resolution where hue is
     decided -- and the same holds for hair colour across strands.  It is
-    masked attention with a single fixed query, so it is cheap, and the zero
-    init makes it the identity at initialisation.  All-zero masks (the null
-    token, or an undetected face) contribute nothing.
+    masked attention with a single fixed query per region and uniform
+    weights: the routing is given by the layout, only the map on the
+    aggregate is learned.  All regions pool from the same input ``h`` (order
+    independent) and the whole layer is three einsums.  Zero init makes it
+    the identity at initialisation; all-zero masks (the null token, or an
+    undetected face) contribute nothing.
     """
 
     proj: list[eqx.nn.Conv2d]
@@ -282,13 +286,16 @@ class RegionPool(eqx.Module):
     def __call__(
         self, h: Float[Array, " C H W"], masks: Float[Array, " K H W"]
     ) -> Float[Array, " C H W"]:
-        """Add the broadcast pooled feature of every region to ``h``."""
-        for k, conv in enumerate(self.proj):
-            m = masks[k]
-            pooled = reduce(h * m, "c h w -> c 1 1", "sum") / (m.sum() + 1e-6)
-            # pool -> project (one matvec on the (C, 1, 1) vector) -> broadcast
-            h = h + m * conv(pooled)
-        return h
+        """Add every region's projected pooled feature back into that region."""
+        w = jax.numpy.stack([c.weight[:, :, 0, 0] for c in self.proj])  # (K, C, C)
+        # Conv2d(use_bias=True) always has a bias; the annotation is Optional.
+        b = jax.numpy.stack(
+            [jax.numpy.reshape(c.bias, (-1,)) for c in self.proj]  # ty: ignore[invalid-argument-type]
+        )
+        mass = reduce(masks, "k h w -> k 1", "sum") + 1e-6
+        pooled = einsum(masks, h, "k h w, c h w -> k c") / mass
+        proj = einsum(w, pooled, "k d c, k c -> k d") + b
+        return h + einsum(masks, proj, "k h w, k d -> d h w")
 
 
 class UNet(eqx.Module):
