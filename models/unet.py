@@ -286,7 +286,8 @@ class RegionPool(eqx.Module):
         for k, conv in enumerate(self.proj):
             m = masks[k]
             pooled = reduce(h * m, "c h w -> c 1 1", "sum") / (m.sum() + 1e-6)
-            h = h + m * conv(jax.numpy.broadcast_to(pooled, h.shape))
+            # pool -> project (one matvec on the (C, 1, 1) vector) -> broadcast
+            h = h + m * conv(pooled)
         return h
 
 
