@@ -194,25 +194,6 @@ Closed — do not re-run (evidence in METHODS.md): any pixel-space loss on x̂ v
 gated or not; FM re-weightings from x_1; the mask-prediction head; the global code;
 standard skips; layout conditioning as a *FID* lever; palette losses; batch 256.
 
-## 5b. Sampling-side and presentation extras (optional, no training)
-
-- **P/R on the final checkpoint** never completed: `experiments/bottleneck.py` OOMs
-  in the guided-sampler stage at batch 256 on the 37M conditioned model.  Pass
-  `bs=64` to the guided `generate(...)` call (line with `sampler=guided`) and rerun
-  `just bottleneck runs/wide_rp_300/model.eqx --skip-sampler --outdir runs/ablation/bottleneck_final`
-  when the GPU is free.  Compare with the unconditioned model's 0.52 / 0.15.
-- **Restart / re-noise refinement** (SDEdit-style: re-noise finished samples to
-  t≈0.5–0.7 and re-solve; or Restart sampling, Xu et al. 2023): a precision lever
-  with no training; reported to improve FID over plain ODE sampling.  Half an hour
-  with the existing harness.  Discriminator guidance (Kim et al. 2023) is the
-  heavier, more general version.
-- **Off-the-shelf anime upscaler for a showcase figure only**: Real-ESRGAN
-  `RealESRGAN_x4plus_anime_6B` (or APISR / waifu2x), run from the detector env
-  (has torch+CUDA) on `runs/wide_rp_300/figures/sample_grid.png` → 256×256.  Purely
-  a what-if for the paper's appendix: caption the model name, state that the 64×64
-  outputs are the result, no metric attached (there is no 256×256 real reference).
-  Keep it out of the pipeline (`experiments/enhance.py` or outside the repo).
-
 ## 6. Paper
 
 `paper/main.tex` (14 pages, builds clean with `latexmk -pdf`).  Sections: data,
