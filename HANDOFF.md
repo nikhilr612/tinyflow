@@ -65,6 +65,31 @@ anything else on the GPU while a `paper` run is going.  Resume with
    `paper/` is untracked right now (the `.tex`, a `.gitignore` for LaTeX by-products,
    and the built PDF — commit the PDF or not as you prefer).
 
+## 2b. Layout control — a second finding to quantify (do this early)
+
+Visually, the region-pool model follows its layout mask far more closely than the
+no-RP conditional model (`runs/exp_cond/rp_vs_nodrop.png`).  Mechanism: without RP
+the layout enters only at the input and is washed out by four GroupNorm stages and
+the bottleneck (the SPADE observation); RP re-injects the mask *shape* inside the
+decoder at 16×16 and 32×32 (`m_k ⊗ W_k ē_k` is region-shaped), so the layer gives
+both cross-region agreement (irises) and layout adherence.  Three measurements turn
+this into a claim (all post-hoc on saved checkpoints; the detector needs the GPU):
+
+1. **Mask-following score**: run `experiments/extract_landmarks.py`-style detection
+   (detector env: `~/.claude/jobs/211c1fe7/tmp/det/bin/python`) on 512 samples from
+   the no-RP model (`runs/exp_cond/nodrop`, archive branch code) and the RP model
+   (`runs/wide_rp_300`), each rendered from known prior layouts; report mean
+   landmark error and eye/face-hull IoU against the given layout, with real images
+   vs their own masks as the ceiling.
+2. **Layout-editing figure**: same noise, a sequence of edited layouts (eyes moved,
+   spaced, face widened, mouth opened) → samples tracking the edit.  `data/layouts.py`
+   has `to_pose_shape` / `from_pose_shape` / `rasterize`; edit in shape space.
+3. **Change locality**: two layouts differing only in the eye region → |Δsample|
+   should concentrate in the eye region for the RP model.
+
+Add the results to METHODS.md §7.3 and the paper §12; "controllable layout" is a
+stronger headline than the iris rate alone.
+
 ## 3. The codebase in one paragraph
 
 Pixel-space flow matching with x-prediction (`models/imagefm.py`), a 4-level U-Net
@@ -134,6 +159,10 @@ first (step 2 above); the ranking assumes it holds.
 5. **Flip-equivariant sampling** — `v_sym = ½[v(x) + flip(v(flip x))]`; 10-minute
    test, no training.
 6. Width 128 (2× again) if compute allows; the rank analysis says width is being used.
+7. **Schedule control for FID**: the final run is FID-neutral vs the plain 200-epoch
+   unconditioned model so far (36.2 at cumulative epoch ~247 vs 32.0 at 200); the
+   missing control is a plain unconditioned run on the same warm-up+cosine schedule
+   and length (`just train ctrl_sched 300 --base-channels 64 --eval-every 50`).
 
 Closed — do not re-run (evidence in METHODS.md): any pixel-space loss on x̂ vs x_1,
 gated or not; FM re-weightings from x_1; the mask-prediction head; the global code;
