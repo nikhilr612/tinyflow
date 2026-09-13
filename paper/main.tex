@@ -24,9 +24,9 @@
 \newcommand{\xh}{\hat{x}}
 \newcommand{\todo}[1]{\textcolor{red}{[#1]}}
 \newtheorem{proposition}{Proposition}
-\graphicspath{{../runs/wide_rp_300/figures/}{../runs/ablation/}{figures/}}
+\newcommand{\figdir}{../runs/wide_rp_300/figures/}
 \newcommand{\figorplaceholder}[2]{%
-  \IfFileExists{#1}{\includegraphics[width=#2]{#1}}{\fbox{\parbox{#2}{\centering\vspace{2em}\texttt{#1}\\(produced by \texttt{just paper})\vspace{2em}}}}}
+  \IfFileExists{\figdir#1}{\includegraphics[width=#2]{\figdir#1}}{\fbox{\parbox{#2}{\centering\vspace{2em}\texttt{#1}\\(produced by \texttt{just paper})\vspace{2em}}}}}
 
 \title{\textbf{Layout-Conditioned Flow Matching with Mask-Guided Region Pooling\\for Anime Face Generation:\\A Complete Record of Methods and Decisions}}
 \author{tinyflow project \\ \texttt{feat/pixel-unet}, September 2026}
