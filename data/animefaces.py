@@ -124,6 +124,44 @@ def load_masks(path: str = "./.preprocessed/anime_faces_masks.npy") -> np.ndarra
     return np.load(path)
 
 
+def load_landmark_scores(
+    path: str = "./.preprocessed/anime_faces_landmark_scores.npy",
+) -> np.ndarray:
+    """Load per-landmark detector confidences aligned with ``preprocess_all``.
+
+    Shape ``(N, 28)``, one score per ``anime-face-detector`` keypoint; the
+    same offline script that makes the masks writes them.
+
+    Args:
+        path: Location of the cached ``(N, 28)`` float array.
+
+    Returns:
+        The score array.
+    """
+    return np.load(path)
+
+
+def curated_indices(scores: np.ndarray, min_mean_score: float) -> np.ndarray:
+    """Indices of images whose mean landmark confidence is at least the threshold.
+
+    The threshold is a content filter, not a quality bar: below a mean score
+    of about 0.3 the anime-faces set is dominated by non-faces (torsos,
+    clothing, hands, duplicated crops -- 317 images, 1.5%), while the
+    0.3-0.65 band is mostly legitimate but hard faces (closed eyes, glasses,
+    masks, mascots) that a generator should keep.  See
+    ``runs/ablation/curation_*.png`` for the bands.
+
+    Args:
+        scores: ``(N, 28)`` landmark confidences from ``load_landmark_scores``.
+        min_mean_score: Keep images with ``scores.mean(1) >= min_mean_score``;
+            ``0`` keeps everything.
+
+    Returns:
+        Sorted integer indices of the kept images.
+    """
+    return np.flatnonzero(scores.mean(axis=1) >= min_mean_score)
+
+
 Element = np.ndarray | tuple[np.ndarray, np.ndarray]
 """A pipeline element: an image, or an ``(image, mask)`` pair."""
 

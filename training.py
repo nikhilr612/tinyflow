@@ -35,12 +35,18 @@ class RunConfig:
             that degrade beyond a 1% tolerance (0 = disabled).
         fid_n_samples: Generated images per FID evaluation.  FID is biased in
             ``n``, so the value is recorded next to each score.
+        fid_batch_size: Images per sampling / Inception batch during FID.
+            Sampling dominates the evaluation cost (a 64-step Dopri5 solve is
+            ~380 network evaluations per batch), so use the largest batch
+            that fits; 256 is fine for the models in this repo on a 24 GB card
+            when nothing else shares it.
     """
 
     outpath: str
     eval_every: int = 1
     early_stop_patience: int = 0
     fid_n_samples: int = 5000
+    fid_batch_size: int = 256
 
 
 def save_sample(model: ImageFM, outdir: Path, noise: jax.Array, epoch: int) -> None:
@@ -108,7 +114,11 @@ def run(
         if evaluate and (epoch + 1) % run_cfg.eval_every == 0:
             key, eval_key = jax.random.split(key)
             fid = evaluate_fid(
-                model, real_stats, eval_key, n_samples=run_cfg.fid_n_samples
+                model,
+                real_stats,
+                eval_key,
+                n_samples=run_cfg.fid_n_samples,
+                batch_size=run_cfg.fid_batch_size,
             )
             print(f"\nEpoch {epoch}: FID = {fid:.2f}", flush=True)
             record["fid"] = round(fid, 2)
