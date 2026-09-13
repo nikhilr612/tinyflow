@@ -221,8 +221,9 @@ internally, $36.7$\,M parameters at \texttt{base\_channels}$=64$ ($9.38$\,M at $
       $h\odot(1+\gamma)+\beta$ with $[\gamma;\beta]=W_a\,\mathrm{SiLU}(e)+b_a$,
       $W_a\in\Rb^{2c'\times128}$ \textbf{zero-initialised} $\to$ SiLU $\to$ $3\times3$
       conv, plus a skip path ($1\times1$ conv if $c\neq c'$, identity otherwise). The
-      modulation has no output gate; ``adaLN-Zero'' in the code refers to the zero
-      initialisation of $W_a$. GroupNorm rather than InstanceNorm is deliberate: per-channel
+      zero initialisation follows adaLN-Zero \citep{peebles2023dit}, the FiLM analogue
+      of the zero-$\gamma$ trick of \citet{wu2018gn}; the modulation has no output
+      gate. GroupNorm \citep{wu2018gn} rather than InstanceNorm is deliberate: per-channel
       statistics would strip per-image brightness and colour cast, which a generator
       must keep.
 \item \textbf{UBlock} at level $i$ with channels $c_i=64\cdot2^i$: \emph{down} =
@@ -338,7 +339,9 @@ peak with a linear warm-up over 500 steps (clamped to $10\%$ of short runs) and 
 decay to $10^{-5}$ at the last step (\texttt{optax.warmup\_cosine\_decay\_schedule}).
 Weights published for sampling and evaluation are an exponential moving average with
 decay $0.999$, warmed up as $\min(0.999,(1+s)/(10+s))$ at step $s$ so early averages
-are not dominated by the initialisation (the DDPM reference scheme). Seed 49 for every
+are not dominated by the initialisation (the scheme of the DDPM reference code,
+\citealp{ho2020ddpm}; the decay is shorter than the literature's $0.9999$ because these
+runs are tens of thousands of steps, not hundreds of thousands). Seed 49 for every
 run; the dataset order, noise and $t$ draws are all derived from it.
 
 The schedule is a late addition: every earlier run used a \emph{constant} $10^{-3}$,
@@ -762,7 +765,11 @@ interpolation at a fixed layout, and eye-region crops.}
 steps and capacity; EDM-style augmentation conditioning with hair/eye hue rotation (a
 dataset-specific coverage prior, semantically valid only for this domain), spatial
 mixing at $16\times16$ with warm-up, a hair-colour consistency metric for the
-region-pool layer, flip-equivariant sampling. Shelved with reasons recorded: structured
+region-pool layer, flip-equivariant sampling, and re-noise-and-re-solve refinement
+of finished samples with the model's own prior (SDEdit, \citealp{meng2022sdedit};
+Restart sampling, \citealp{xu2023restart}; implemented in
+\texttt{experiments/refine.py}, results pending) as the in-distribution alternative
+to external upscalers. Shelved with reasons recorded: structured
 output heads (line/fill, palette) as precision-side bets with a representational risk.
 
 % =====================================================================
@@ -779,6 +786,8 @@ a 16-step 5{,}000-sample FID takes $\approx2$ minutes.
 \begin{thebibliography}{9}\small
 \bibitem[Cootes et al.(1995)]{cootes1995asm} T.~F. Cootes, C.~J. Taylor, D.~H. Cooper,
 J.~Graham. Active shape models---their training and application. \emph{CVIU}, 1995.
+\bibitem[Ho et al.(2020)]{ho2020ddpm} J.~Ho, A.~Jain, P.~Abbeel. Denoising diffusion
+probabilistic models. \emph{NeurIPS}, 2020.
 \bibitem[Ho \& Salimans(2022)]{ho2022cfg} J.~Ho, T.~Salimans. Classifier-free diffusion
 guidance. arXiv:2207.12598, 2022.
 \bibitem[Kynkäänniemi et al.(2019)]{kynkaanniemi2019pr} T.~Kynkäänniemi, T.~Karras,
@@ -791,8 +800,16 @@ diffusion models. \emph{NeurIPS}, 2024.
 generative models denoise (JiT). \emph{CVPR}, 2026.
 \bibitem[Lipman et al.(2023)]{lipman2023fm} Y.~Lipman, R.~T.~Q. Chen, H.~Ben-Hamu,
 M.~Nickel, M.~Le. Flow matching for generative modeling. \emph{ICLR}, 2023.
+\bibitem[Meng et al.(2022)]{meng2022sdedit} C.~Meng, Y.~He, Y.~Song, J.~Song, J.~Wu,
+J.-Y. Zhu, S.~Ermon. SDEdit: guided image synthesis and editing with stochastic
+differential equations. \emph{ICLR}, 2022.
 \bibitem[Mathieu et al.(2016)]{mathieu2016gdl} M.~Mathieu, C.~Couprie, Y.~LeCun. Deep
 multi-scale video prediction beyond mean square error. \emph{ICLR}, 2016.
+\bibitem[Peebles \& Xie(2023)]{peebles2023dit} W.~Peebles, S.~Xie. Scalable diffusion
+models with transformers. \emph{ICCV}, 2023.
+\bibitem[Wu \& He(2018)]{wu2018gn} Y.~Wu, K.~He. Group normalization. \emph{ECCV}, 2018.
+\bibitem[Xu et al.(2023)]{xu2023restart} Y.~Xu, M.~Deng, X.~Cheng, Y.~Tian, Z.~Liu,
+T.~Jaakkola. Restart sampling for improving generative processes. \emph{NeurIPS}, 2023.
 \bibitem[Zhu et al.(2020)]{zhu2020sean} P.~Zhu, R.~Abdal, Y.~Qin, P.~Wonka. SEAN: image
 synthesis with semantic region-adaptive normalization. \emph{CVPR}, 2020.
 \end{thebibliography}

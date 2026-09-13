@@ -465,7 +465,7 @@ class UNet(eqx.Module):
         channels in (``C_in = C_out + cond_channels + 1``) and emits the image.
 
         The final bounded activation is omitted.  With the velocity field
-        parametrised through the denoised image (Li & He, 2025) the regression
+        parametrised through the denoised image (Li & He, 2026) the regression
         target is unbounded either way, and a bounded output would add
         vanishing gradients without gaining anything.
         """
