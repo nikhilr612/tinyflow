@@ -385,9 +385,68 @@ Reproduction:
         --region-pool 1 --n-epochs 40 --eval-every 0 --early-stop-patience 0 --seed 49
     uv run python experiments/cond_eval.py runs/exp_cond/nodrop_rp/model.eqx --modes prior,real --n-steps 16
 
-Open: hair-colour consistency under the same layer (a metric is not yet
-written); behaviour at length; whether the unconditional mode (with dropout)
-also benefits.
+Eye-region chroma of the region-pool model vs real (256 samples): saturation
+0.121 ± 0.067 vs 0.137 ± 0.071; Cb/Cr std 85–95 % of real; the 8-bin hue histogram
+has the same dominant band (32 % in both).  The layer enforces *agreement*, not a
+particular colour.
+
+**Definition change.** The first implementation updated `h` sequentially over
+regions (later regions pooled features already offset by earlier ones; regions
+overlap).  The parallel, order-independent form above differs by mean |Δx̂| =
+0.008 (1.6 % of |x̂|) on the 40-epoch checkpoint; re-confirmed on the parallel
+form (`runs/confirm_rp`, same recipe): loss 0.0815, FID 52.1 / 51.4, iris
+mismatch **6.25 %** / 5.1 %.
+
+### 7.4 Final run (`runs/wide_rp_300`): 300 epochs, three segments
+
+Recipe: wide, curated, pure conditional (`cond_channels 3`, no dropout),
+`region_pool 1`, batch 128, EMA 0.999, 16-step FID every 50 epochs with prior
+layouts.  Course: the first attempt at constant LR 1e-3 diverged in one epoch at
+epoch 80 (loss 0.0784 → 0.2837; FID 42.0 at epoch 49); a warm-up + cosine schedule
+(500 steps, to 1 % of peak) was introduced and the run resumed from the epoch-49
+EMA weights with a fresh optimiser (`--init-from`); the second segment (49 epochs,
+loss 0.0770) was killed at its first FID by a cuSolver failure caused by a
+concurrent GPU job; the third segment ran 200 epochs from those weights.
+Checkpoints and loss logs of every segment are kept (`runs/wide_rp_300_ep49.eqx`,
+`_ep98.eqx`, `wide_rp_300_losses_collapsed.json`, `_seg2.json`).
+
+| cumulative epoch | plain unconditioned wide (constant LR) | this run |
+|---|---|---|
+| ~50 | 43.1 | 42.0 |
+| ~150 | 36.5 | 47.8 (just after a warm restart) |
+| ~200 | **32.0** | **34.9** (`best_model.eqx`) |
+| ~250 | — | 36.2 |
+| ~300 | — | 37.5 |
+
+Final evaluation (16 steps, 5000 samples): **FID 37.8 prior layouts / 34.2 real
+layouts; iris mismatch 4.7 % / 4.7 %** (real 5.0 %; mean L/R chroma distance 0.039
+vs 0.037 real); final loss 0.0557.  Layout adherence is visibly strong
+(`figures/layout_to_image.png`).
+
+Readings.  (i) The eye result holds at length and reaches the data's own rate.
+(ii) FID is not better than the plain model: ≈6 behind at the end, ≈3.5 at the
+best point; the turning point is near 200 cumulative epochs (~33 k steps), after
+which FID drifts up while the training loss keeps falling (0.077 → 0.056).  Note
+that FID reference statistics are the *training* images, so this drift is not
+memorisation of training images (that would lower FID); it is samples moving away
+from, or collapsing within, the training distribution — precision/recall on this
+checkpoint was not measured (the guided stage of `bottleneck.py` OOMs at batch
+256; `bs=64` fixed in `9656891`, rerun pending).  (iii) The prior-vs-real layout
+gap (3.5 FID), absent at 40 epochs, opened as adherence sharpened: a residual
+mismatch between the prior's layouts and the data's becomes an FID cost once the
+model follows layouts closely.  (iv) Confounds: two warm restarts; no
+schedule-matched unconditioned control.
+
+**Recipe going forward:** `just paper NAME 200 25` (one segment, cosine ending at
+200, FID every 25), report `best_model.eqx` and the final; never chain warm
+restarts.
+
+**Presentation upscalers — tried and dropped.** Real-ESRGAN (x4plus general,
+anime 6B, animevideov3) and APISR (RRDB, GRL, DAT) were run on the final samples
+(`runs/upscale/compare_models.png`).  Trained on clean-then-degraded pairs, they
+treat every irregularity of a 64×64 sample as signal and render the generator's
+own errors as confident detail; the native 64×64 samples read better.  No figure
+in the paper.
 
 ---
 
@@ -450,7 +509,11 @@ region-pool conditional model with cosine decay rather than train from scratch.
 dataset-specific coverage prior).  (3) Spatial mixing at 16×16 (attention or
 token-mixing MLP) with warm-up, judged on the long protocol, as a fine-tune from
 the strong checkpoint (all additions are zero-init).  (4) Hair-colour consistency
-metric for the region-pool layer.  (5) Flip-equivariant sampling (free test).
+metric for the region-pool layer.  (5) Flip-equivariant sampling (free test).  (6) Schedule-matched unconditioned
+control for the final run (`just train ctrl 300 --base-channels 64 --eval-every 50`)
+and precision/recall of `runs/wide_rp_300` (§7.4).  (7) Re-noise-and-re-solve
+refinement (SDEdit / Restart sampling) as the model's-own-prior alternative to
+external upscalers.
 
 **Protocol from here.** Loss + FID (16 steps) + recall + iris mismatch on every
 arm; screening only for collapse; anything within 5 FID needs a second seed or

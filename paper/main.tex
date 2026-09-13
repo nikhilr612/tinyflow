@@ -700,9 +700,27 @@ approximates one long cosine; checkpoints and loss logs of every segment are kep
 (\texttt{runs/wide\_rp\_300\_ep49.eqx}, \texttt{\_ep98.eqx}, and the corresponding
 \texttt{losses.json} files).
 
-\paragraph{Results.} \todo{final FID with prior / real layouts, iris mismatch,
-precision/recall and the figures below are filled in from \texttt{runs/wide\_rp\_300}
-when the run completes.}
+\paragraph{Results.} Final loss $0.0557$. Training-time FID over the last
+segment (16-step sampler, prior layouts), at cumulative epochs $\approx147/197/247/297$:
+$47.8/34.9/36.2/37.5$---best at $\approx200$ cumulative epochs, drifting up
+thereafter; \texttt{best\_model.eqx} is that checkpoint. Final evaluation of the last
+weights (5{,}000 samples, 16 steps): FID $\mathbf{37.8}$ with prior layouts and
+$34.2$ with real layouts; \textbf{iris mismatch $4.7\%$} under either (real data
+$5.0\%$; mean left/right chroma distance $0.039$ vs $0.037$ real). Layout adherence
+is strong (Fig.~\ref{fig:showcase}, layout-to-image panel: tilt, eye spacing and eye
+height track the mask in every sample). Against the plain unconditioned 200-epoch model
+($31.4$ at the same sampler) the conditioned model is $\approx6$ FID behind at the
+end and $\approx3.5$ behind at its best point, while solving the eye defect outright;
+the prior-vs-real layout gap ($3.5$ FID), absent at 40 epochs ($50.7$ vs $50.1$),
+opened as adherence sharpened, which points at a residual mismatch between the prior's
+layouts and the data's as one component of the deficit. Two confounds remain open: the
+two warm restarts in the schedule, and the absence of a schedule-matched unconditioned
+control; the precision/recall of the final checkpoint was not measured (the guided
+stage of the analysis exceeded GPU memory at the batch size used). Off-the-shelf
+anime super-resolution models (Real-ESRGAN variants, APISR) were tried on the samples
+for presentation and dropped: trained on clean-then-degraded pairs, they render the
+generator's own errors as confident detail, and the native $64\times64$ samples read
+better.
 
 \begin{figure}[t]
 \centering
