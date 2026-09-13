@@ -7,7 +7,7 @@ number.  So three modes, reported separately:
 
 1. ``uncond``  -- null token; the apples-to-apples comparison with
    unconditioned models (no information about any ``x_1`` enters);
-2. ``prior``   -- masks sampled from ``LandmarkPrior`` (no real image
+2. ``prior``   -- masks sampled from ``LayoutPrior`` (no real image
    involved); the two-stage generator's headline number, and where the
    left/right eye-consistency metric is meaningful;
 3. ``real``    -- masks of held-out real images; an *upper bound* on what
@@ -37,11 +37,13 @@ import numpy as np  # noqa: E402
 import typer  # noqa: E402
 
 from data.animefaces import load_masks, preprocess_all  # noqa: E402
+from data.layouts import LayoutPrior  # noqa: E402
 from experiments.eye_consistency import eye_distance  # noqa: E402
-from experiments.landmark_prior import LandmarkPrior, rasterize  # noqa: E402
 from metrics import compute_real_stats, evaluate_fid  # noqa: E402
-from models.imagefm import EYE_CHANNEL, ImageFM  # noqa: E402
+from models.imagefm import ImageFM  # noqa: E402
 from models.unet import UNet  # noqa: E402
+
+EYE_CHANNEL = 1  # mask channels: 0 face, 1 eyes, 2 mouth
 
 
 class MaskedSampler:
@@ -73,17 +75,17 @@ def main(
     """
     arr = preprocess_all("./data/anime-faces")
     real_stats = compute_real_stats(arr)
-    model = ImageFM.load(checkpoint, lambda key, **hp: UNet(**hp, key=key))
+    model = ImageFM.load(checkpoint, UNet.from_hparams)
     model.n_steps = n_steps
     k = model.cond_channels
     if k == 0:
         raise SystemExit("not a conditioned model (cond_channels == 0)")
     masks_real = load_masks()
-    prior = LandmarkPrior.load()
+    prior = LayoutPrior.load()
 
     def prior_masks(n, key):
         s = int(jax.random.randint(key, (), 0, 2**31 - 1))
-        return jnp.asarray(rasterize(prior.sample(n, seed=s))[..., :k])
+        return jnp.asarray(prior.sample_masks(n, seed=s)[..., :k])
 
     def real_masks(n, key):
         idx = np.asarray(jax.random.choice(key, len(masks_real), (n,), replace=False))

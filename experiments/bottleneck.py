@@ -52,9 +52,10 @@ import typer  # noqa: E402
 from fidax.fid import FrechetInceptionDistance, _extract_activations  # noqa: E402
 
 from data.animefaces import load_masks, preprocess_all, to_uint8  # noqa: E402
-from experiments.guidance import GuidedSampler, edge_mass  # noqa: E402
+from data.layouts import LayoutPrior  # noqa: E402
+from experiments.guidance import GuidedSampler, edge_mass, sobel_magnitude  # noqa: E402
 from metrics import _to_inception_input, compute_real_stats, evaluate_fid  # noqa: E402
-from models.imagefm import ImageFM  # noqa: E402
+from models.imagefm import ImageFM, cond_token  # noqa: E402
 from models.unet import UNet  # noqa: E402
 
 mpl.use("Agg")
@@ -98,21 +99,30 @@ def precision_recall(real: np.ndarray, fake: np.ndarray, k: int = 3):
     return float(precision), float(recall), d_fr.min(1)
 
 
-def generate(model, n: int, key, bs: int = 256, sampler=None) -> np.ndarray:
-    """``n`` samples in ``[-1, 1]`` from ``model`` (or a wrapper with ``.generate``)."""
-    src = sampler or model
+def generate(model, n: int, key, bs: int = 256, sampler=None, bank=None) -> np.ndarray:
+    """``n`` samples in ``[-1, 1]`` from ``model`` (or a wrapper with ``.generate``).
+
+    ``bank``: prior-sampled masks for a layout-conditioned ``model`` (cycled).
+    """
     out = []
     for i in range(0, n, bs):
         key, sk = jax.random.split(key)
-        noise = jax.random.normal(sk, (min(bs, n - i), 64, 64, 3))
-        out.append(np.clip(np.asarray(src.generate(noise)), -1, 1))
+        m = min(bs, n - i)
+        noise = jax.random.normal(sk, (m, 64, 64, 3))
+        if sampler is not None:
+            x = sampler.generate(noise)
+        elif bank is not None:
+            idx = (np.arange(m) + i) % len(bank)
+            x = model.generate(noise, jnp.asarray(bank[idx]))
+        else:
+            x = model.generate(noise)
+        out.append(np.clip(np.asarray(x), -1, 1))
     return np.concatenate(out)
 
 
 def cell_stats(x: np.ndarray, cells: int = 8) -> dict[str, np.ndarray]:
     """Per-cell edge mass, luma std and chroma std, ``(cells, cells)`` each."""
-    gx, gy = ImageFM._sobel(jnp.asarray(x))
-    edge = np.asarray(jnp.sqrt(gx**2 + gy**2).mean(-1))
+    edge = np.asarray(sobel_magnitude(jnp.asarray(x)))
     luma = x @ LUMA
     r, b = x[..., 0], x[..., 2]
     cb, cr = 0.5 * (b - luma) / 0.886, 0.5 * (r - luma) / 0.701
@@ -140,6 +150,19 @@ def save_grid(imgs: np.ndarray, path: Path, cols: int = 16, scale: int = 2):
     ).save(path)
 
 
+class _Banked:
+    """``generate(noise)`` for a conditioned model with a cycled mask bank."""
+
+    def __init__(self, model, bank):
+        self.model, self.bank, self.pos = model, jnp.asarray(bank), 0
+
+    def generate(self, x_0):
+        """Sample with the next masks from the bank."""
+        idx = (self.pos + jnp.arange(len(x_0))) % len(self.bank)
+        self.pos = (self.pos + len(x_0)) % len(self.bank)
+        return self.model.generate(x_0, self.bank[idx])
+
+
 # --------------------------------------------------------------------------
 
 
@@ -157,7 +180,10 @@ def main(
     arr = preprocess_all("./data/anime-faces")
     real_stats = compute_real_stats(arr)
     masks = load_masks().astype(np.float32).mean(0) / 255  # dataset-mean (H, W, 3)
-    model = ImageFM.load(checkpoint, lambda key, **hp: UNet(**hp, key=key))
+    model = ImageFM.load(checkpoint, UNet.from_hparams)
+    bank = None
+    if model.cond_channels:
+        bank = LayoutPrior.load().sample_masks(5000, seed)[..., : model.cond_channels]
     rng = np.random.default_rng(seed)
     results: dict = {"checkpoint": checkpoint}
     lines = [f"# Bottleneck analysis: `{checkpoint}`\n"]
@@ -176,9 +202,17 @@ def main(
         "mouth": masks[..., 2],
         "hair/background": 1 - masks[..., 0],
     }
+    cond_maps = None
+    if model.cond_channels:
+        m_real = load_masks()[idx].astype(np.float32) / 255
+        cond_maps = cond_token(
+            jnp.asarray(m_real[..., : model.cond_channels]),
+            (n_maps, 64, 64, model.cond_channels),
+        )
     for t in ts:
         xt = t * x1 + (1 - t) * x0
-        xh = forward(model.net_theta, xt, jnp.full((n_maps,), t))
+        x_in = xt if cond_maps is None else jnp.concatenate([xt, cond_maps], -1)
+        xh = forward(model.net_theta, x_in, jnp.full((n_maps,), t))
         e = np.asarray(((xh - x1) ** 2).mean(0).mean(-1))  # (H, W)
         err_maps[t] = e
         rows.append(
@@ -221,7 +255,7 @@ def main(
 
     # ---------------- 2. generated vs real local texture (sampling-time view)
     n_tex = 1024
-    gen = generate(model, n_tex, jax.random.key(seed + 1))
+    gen = generate(model, n_tex, jax.random.key(seed + 1), bank=bank)
     real = arr[rng.choice(len(arr), n_tex, replace=False)]
     cs_g, cs_r = cell_stats(gen), cell_stats(real)
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.6))
@@ -266,13 +300,13 @@ def main(
     )
     f_real = features(real_a, fid)
     pr_rows = []
-    gen_pr = generate(model, n_pr, jax.random.key(seed + 2))
+    gen_pr = generate(model, n_pr, jax.random.key(seed + 2), bank=bank)
     f_gen = features(gen_pr, fid)
     p, r, d_near = precision_recall(f_real, f_gen)
     pr_rows.append(["plain sampler", p, r])
     m_edge_real = float(jax.vmap(edge_mass)(jnp.asarray(real_a[:512])).mean())
     guided = GuidedSampler(
-        model, lambda x: jax.nn.relu(m_edge_real - edge_mass(x)) ** 2, 0.02
+        model, lambda x: jax.nn.relu(m_edge_real - edge_mass(x)) ** 2, 0.02, masks=bank
     )
     gen_g = generate(model, n_pr, jax.random.key(seed + 2), sampler=guided)
     p_g, r_g, _ = precision_recall(f_real, features(gen_g, fid))
@@ -310,7 +344,8 @@ def main(
         steps_rows = []
         for n_steps in (16, 32, 64, 128):
             model.n_steps = n_steps
-            f = evaluate_fid(model, real_stats, jax.random.key(seed + 3), n_fid)
+            src = model if bank is None else _Banked(model, bank)
+            f = evaluate_fid(src, real_stats, jax.random.key(seed + 3), n_fid)
             steps_rows.append([n_steps, f])
             lines.append(f"| {n_steps} | {f:.1f} |")
             print(f"steps {n_steps}: FID {f:.1f}")

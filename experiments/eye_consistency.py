@@ -27,12 +27,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import typer  # noqa: E402
 
 from data.animefaces import load_masks, preprocess_all  # noqa: E402
-from models.imagefm import EYE_CHANNEL, ImageFM  # noqa: E402
+from data.layouts import LayoutPrior  # noqa: E402
+from models.imagefm import ImageFM  # noqa: E402
 from models.unet import UNet  # noqa: E402
+
+EYE_CHANNEL = 1  # mask channels: 0 face, 1 eyes, 2 mouth
 
 
 def chroma(x: np.ndarray) -> np.ndarray:
@@ -50,8 +54,11 @@ def eye_distance(x: np.ndarray, left: np.ndarray, right: np.ndarray) -> np.ndarr
     return np.linalg.norm(ml - mr, axis=-1)
 
 
-def main(arms: list[str], n: int = 256, seed: int = 0):
-    """Print one row per real half and per ``name=path`` checkpoint."""
+def main(arms: list[str], n: int = 256, seed: int = 0, n_steps: int = 16):
+    """Print one row per real half and per ``name=path`` checkpoint.
+
+    Layout-conditioned checkpoints are sampled with masks from the prior.
+    """
     arr = preprocess_all("./data/anime-faces")
     m = load_masks()[..., EYE_CHANNEL].astype(np.float32).mean(0) / 255.0
     left, right = m.copy(), m.copy()
@@ -68,8 +75,14 @@ def main(arms: list[str], n: int = 256, seed: int = 0):
     noise = jax.random.normal(jax.random.key(seed), (n, 64, 64, 3))
     for arm in arms:
         name, path = arm.split("=", 1)
-        model = ImageFM.load(path, lambda key, **hp: UNet(**hp, key=key))
-        gen = np.clip(np.asarray(model.generate(noise)), -1, 1)
+        model = ImageFM.load(path, UNet.from_hparams)
+        model.n_steps = n_steps
+        masks = None
+        if model.cond_channels:
+            masks = jnp.asarray(
+                LayoutPrior.load().sample_masks(n, seed)[..., : model.cond_channels]
+            )
+        gen = np.clip(np.asarray(model.generate(noise, masks)), -1, 1)
         rows.append((name, eye_distance(gen, left, right)))
 
     print(f"threshold (real p95) = {thresh:.4f}\n")

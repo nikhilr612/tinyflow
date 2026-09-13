@@ -52,3 +52,8 @@ ignore = ['F722']
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[dependency-groups]
+dev = [
+    "scikit-learn>=1.9.1",
+]

@@ -14,24 +14,42 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import PIL.Image as Pilimage  # noqa: E402
 import typer  # noqa: E402
 from PIL import ImageDraw, ImageFont  # noqa: E402
 
 from data.animefaces import to_uint8  # noqa: E402
+from data.layouts import LayoutPrior  # noqa: E402
 from models.imagefm import ImageFM  # noqa: E402
 from models.unet import UNet  # noqa: E402
 
 
-def main(out: str, arms: list[str], n: int = 8, seed: int = 0, scale: int = 2):
-    """Write ``out``: one row per ``name=path`` arm, ``n`` samples from shared noise."""
+def main(
+    out: str,
+    arms: list[str],
+    n: int = 8,
+    seed: int = 0,
+    scale: int = 2,
+    n_steps: int = 32,
+):
+    """Write ``out``: one row per ``name=path`` arm, ``n`` samples from shared noise.
+
+    Layout-conditioned arms share the same prior-sampled masks as well.
+    """
     noise = jax.random.normal(jax.random.key(seed), (n, 64, 64, 3))
     rows, names = [], []
     for arm in arms:
         name, path = arm.split("=", 1)
-        model = ImageFM.load(path, lambda key, **hp: UNet(**hp, key=key))
-        imgs = to_uint8(model.generate(noise))
+        model = ImageFM.load(path, UNet.from_hparams)
+        model.n_steps = n_steps
+        masks = None
+        if model.cond_channels:
+            masks = jnp.asarray(
+                LayoutPrior.load().sample_masks(n, seed)[..., : model.cond_channels]
+            )
+        imgs = to_uint8(model.generate(noise, masks))
         rows.append(np.concatenate(list(imgs), axis=1))
         names.append(name)
     grid = np.concatenate(rows, axis=0)
