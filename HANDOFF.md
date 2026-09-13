@@ -4,6 +4,32 @@ Written 2026-09-13 23:35 while the final run was still training.  Everything
 below is on branch `feat/pixel-unet`; the full experiment tree (including every
 dropped variant) is on `exp/aux-loss-campaign`.
 
+## 0. Final-run result (2026-09-13 23:54) and the recipe it implies
+
+`runs/wide_rp_300` finished: 300 effective epochs in three segments.  Final
+evaluation (16-step sampler, 5000 samples): **FID 37.8 with prior layouts / 34.2 with
+real layouts; iris mismatch 4.7 % / 4.7 % (real data 5.0 %)**; final loss 0.0557.
+Training-time FID over the last segment (cumulative epochs ~147/197/247/297):
+47.8 / 34.9 / 36.2 / 37.5 — best at ~200 cumulative epochs, drifting up after.
+`runs/wide_rp_300/best_model.eqx` is that epoch-99-of-segment-3 checkpoint (34.9)
+and is the one to use / report alongside the final.
+
+Reading: the eye result is solved and reproduced (6.6 → 6.25 → 4.7 %); layout
+adherence is strong (`figures/layout_to_image.png`); FID is *not* better than the
+plain 200-epoch unconditioned model (31.4 at the same sampler) and the prior-vs-real
+layout gap (3.5 FID) opened as adherence sharpened.  Confounds: two warm restarts
+in the schedule; no schedule-matched unconditioned control yet (§5.7).
+
+**Recipe for the next run of this architecture** — the turning point is near 200
+cumulative epochs (~33 k steps at batch 128), not 100:
+
+    just paper NAME 200 25          # one segment, cosine ending at 200, FID every 25
+
+then use `runs/NAME/best_model.eqx` (best training-time FID), evaluate it with
+`just eval`, and report best and final.  Do not chain warm restarts; if a run must
+be resumed, resume with `--n-epochs` set to the *remaining* epochs so the cosine
+ends where the run ends, and say so in the write-up.
+
 ## 1. What is running / where it ends up
 
 `just paper wide_rp_300 200 50 --init-from runs/wide_rp_300_ep98.eqx` was launched
