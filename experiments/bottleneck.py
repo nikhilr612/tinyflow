@@ -308,7 +308,8 @@ def main(
     guided = GuidedSampler(
         model, lambda x: jax.nn.relu(m_edge_real - edge_mass(x)) ** 2, 0.02, masks=bank
     )
-    gen_g = generate(model, n_pr, jax.random.key(seed + 2), sampler=guided)
+    # gradient through the network per evaluation: keep the batch small
+    gen_g = generate(model, n_pr, jax.random.key(seed + 2), bs=64, sampler=guided)
     p_g, r_g, _ = precision_recall(f_real, features(gen_g, fid))
     pr_rows.append(["edge guidance lam=0.02", p_g, r_g])
     p_rr, r_rr, _ = precision_recall(
