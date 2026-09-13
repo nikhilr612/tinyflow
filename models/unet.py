@@ -270,31 +270,26 @@ class RegionPool(eqx.Module):
     aggregate is learned.  All regions pool from the same input ``h`` (order
     independent) and the whole layer is three einsums.  Zero init makes it
     the identity at initialisation; all-zero masks (the null token, or an
-    undetected face) contribute nothing.
+    undetected face) contribute nothing.  ``W_k`` and ``b_k`` are stored as
+    ``(K, C, C)`` and ``(K, C)`` arrays.
     """
 
-    proj: list[eqx.nn.Conv2d]
+    weight: Float[Array, " K C C"]
+    bias: Float[Array, " K C"]
 
-    def __init__(self, channels: int, n_regions: int, key: PRNGKeyArray):
-        """One zero-initialised ``channels -> channels`` 1x1 conv per region."""
-        self.proj = []
-        for sk in jax.random.split(key, n_regions):
-            conv = eqx.nn.Conv2d(channels, channels, kernel_size=1, key=sk)
-            self.proj.append(jax.tree.map(jax.numpy.zeros_like, conv))
+    def __init__(self, channels: int, n_regions: int):
+        """Zero-initialised ``channels -> channels`` map per region."""
+        self.weight = jax.numpy.zeros((n_regions, channels, channels))
+        self.bias = jax.numpy.zeros((n_regions, channels))
 
     @jaxtyped(typechecker=beartype)
     def __call__(
         self, h: Float[Array, " C H W"], masks: Float[Array, " K H W"]
     ) -> Float[Array, " C H W"]:
         """Add every region's projected pooled feature back into that region."""
-        w = jax.numpy.stack([c.weight[:, :, 0, 0] for c in self.proj])  # (K, C, C)
-        # Conv2d(use_bias=True) always has a bias; the annotation is Optional.
-        b = jax.numpy.stack(
-            [jax.numpy.reshape(c.bias, (-1,)) for c in self.proj]  # ty: ignore[invalid-argument-type]
-        )
         mass = reduce(masks, "k h w -> k 1", "sum") + 1e-6
         pooled = einsum(masks, h, "k h w, c h w -> k c") / mass
-        proj = einsum(w, pooled, "k d c, k c -> k d") + b
+        proj = einsum(self.weight, pooled, "k d c, k c -> k d") + self.bias
         return h + einsum(masks, proj, "k h w, k d -> d h w")
 
 
@@ -395,10 +390,7 @@ class UNet(eqx.Module):
             # levels whose up block outputs 16x16 and 32x32 (64 / 2**i)
             for level in (2, 1):
                 if level < n_blocks:
-                    sk_r, key = jax.random.split(key)
-                    self.region_pools[level] = RegionPool(
-                        base_channels * 2**level, 4, sk_r
-                    )
+                    self.region_pools[level] = RegionPool(base_channels * 2**level, 4)
 
     @classmethod
     def from_hparams(cls, key: PRNGKeyArray, **hparams) -> "UNet":
