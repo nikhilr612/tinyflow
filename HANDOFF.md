@@ -30,6 +30,24 @@ then use `runs/NAME/best_model.eqx` (best training-time FID), evaluate it with
 be resumed, resume with `--n-epochs` set to the *remaining* epochs so the cosine
 ends where the run ends, and say so in the write-up.
 
+## 0b. Overnight queue (started 2026-09-14 01:05) — read `runs/chain_night.log` first
+
+`runs/chain_night.sh` runs these in order; each line in `runs/chain_night.log`
+marks a stage finished, `ALL_DONE` at the end (expected ≈ 06:30).
+
+| stage | output | what to look at |
+|---|---|---|
+| edge guidance on `best_model.eqx` | `runs/ablation/guidance_final.log`, `guidance_final/` | FID per (λ, window); λ=0 gives 34.6 |
+| precision / recall etc. | `runs/ablation/bottleneck_final/REPORT.md` | recall vs 0.154, precision vs 0.521 of the plain model |
+| mask-following score | `runs/ablation/mask_following.log` | landmark error / hull IoU: `rp_best` vs `no_rp` vs `real` |
+| refinement sweep | `runs/ablation/refine.log`, `refine/grid_t0.png` | FID vs t0; t0=0 is the reference |
+| `ctrl_sched` | `runs/ctrl_sched/losses.json` | plain unconditioned model, same schedule/length: the missing FID control |
+| `wide_rp_200` | `runs/wide_rp_200/{cond_eval.json,figures/}` | the recipe as recommended (one segment, cosine to 200, FID/25) |
+
+Then: put the numbers into METHODS.md (§4 guidance, §5 bottleneck, §7.3 layout
+control, new §7.5 refinement, §7.4 control) and the paper (§9, §10, §12, §13),
+rebuild, commit.  `just fid runs/ctrl_sched runs/wide_rp_200` prints the curves.
+
 ## 1. What is running / where it ends up
 
 `just paper wide_rp_300 200 50 --init-from runs/wide_rp_300_ep98.eqx` was launched
