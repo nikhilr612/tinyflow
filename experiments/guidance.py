@@ -15,6 +15,14 @@ units, and ``gate(t) = 1[t_lo < t < t_hi]`` (guidance in a limited interval,
 Kynkaanniemi et al. 2024).  One-sided: it switches off once the sample has
 the data's edge mass, which is why small ``lam`` lands near ``edge/real = 1``.
 
+``--scale sigma2`` replaces the constant step by ``lam * ((1 - t) / t)^2``
+(clipped at 4, i.e. its value at ``t = 1/3``; equal to ``lam`` at ``t = 1/2``).
+This is the posterior-variance factor of energy/classifier guidance (Dhariwal &
+Nichol 2021; Chung et al. 2023): a shift of the posterior mean ``x_hat`` by
+``-sigma_t^2 dE/dx`` is what a tilt ``p(x_1 | x_t) exp(-E)`` induces, and
+``sigma_t^2 = ((1 - t) / t)^2`` in ``x_1`` units for the linear path.  The
+constant schedule under-guides early and over-guides late by comparison.
+
 Measured (METHODS.md section 4): -8 FID on a 9M model, -3 on the 37M
 200-epoch model at ``lam = 0.02``; the best 9M setting was ``lam = 0.05`` on
 ``t in (0.5, 1)``.  Cost: one backward pass per network evaluation.
@@ -91,9 +99,17 @@ class GuidedSampler:
         t_lo: float = 0.0,
         t_hi: float = 1.0,
         masks: np.ndarray | None = None,
+        scale: str = "const",
     ):
-        """Wrap ``model``; ``energy(x_hat) -> scalar`` on one ``(H, W, C)`` image."""
+        """Wrap ``model``; ``energy(x_hat) -> scalar`` on one ``(H, W, C)`` image.
+
+        ``scale``: ``"const"`` (step ``lam``) or ``"sigma2"`` (step
+        ``lam * min(((1 - t) / t)^2, 4)``).
+        """
+        if scale not in ("const", "sigma2"):
+            raise ValueError(f"unknown scale {scale!r}")
         self.model, self.lam, self.t_lo, self.t_hi = model, lam, t_lo, t_hi
+        self.sigma2 = scale == "sigma2"
         self.masks = None if masks is None else jnp.asarray(masks)
         self._pos = 0
         net, floor = model.net_theta, model.denom_floor
@@ -112,6 +128,8 @@ class GuidedSampler:
             xh, g = x_hat_and_grad(x, t, c)
             rms = jnp.sqrt((g**2).mean()) + 1e-12
             gate = jnp.where((t > t_lo) & (t < t_hi), 1.0, 0.0)
+            if self.sigma2:
+                gate = gate * jnp.minimum(((1 - t) / jnp.maximum(t, 1e-3)) ** 2, 4.0)
             xh = xh - lam * gate * g / rms
             return (xh - x) / jnp.maximum(1 - t, floor)
 
@@ -153,6 +171,7 @@ def main(
     n_steps: int = 16,
     seed: int = 0,
     outdir: str = "runs/ablation/guidance",
+    scale: str = "const",
 ):
     """Sweep ``lam`` x interval; print FID and edge mass; write grids + JSON."""
     out = Path(outdir)
@@ -169,7 +188,10 @@ def main(
     if model.cond_channels:
         masks = LayoutPrior.load().sample_masks(n_fid, seed)[..., : model.cond_channels]
     sampler = GuidedSampler(
-        model, lambda x: jax.nn.relu(m_edge_real - edge_mass(x)) ** 2, masks=masks
+        model,
+        lambda x: jax.nn.relu(m_edge_real - edge_mass(x)) ** 2,
+        masks=masks,
+        scale=scale,
     )
     windows = [tuple(float(v) for v in w.split("-")) for w in intervals.split(",")]
     lam_list = [float(v) for v in lams.split(",")]
@@ -196,7 +218,11 @@ def main(
         (grid.shape[1] * 2, grid.shape[0] * 2), Pilimage.Resampling.NEAREST
     ).save(out / "grid_edge.png")
     with (out / "results.json").open("w") as f:
-        json.dump({"real_edge_mass": m_edge_real, "runs": results}, f, indent=2)
+        json.dump(
+            {"real_edge_mass": m_edge_real, "scale": scale, "runs": results},
+            f,
+            indent=2,
+        )
     print(f"\nwrote {out}/results.json and grid_edge.png (rows = configs in order)")
 
 
