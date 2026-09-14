@@ -67,7 +67,7 @@ def near_duplicates(images: np.ndarray, threshold: float = 0.995) -> np.ndarray:
 
 def curate(images: np.ndarray, masks: np.ndarray, classes: np.ndarray) -> np.ndarray:
     """Training keep-mask; ``classes`` is ``(N, 19)`` bool label presence."""
-    face = (masks[..., 0] / 255.0).sum((1, 2))
+    face = (masks[..., 0] / 255.0).sum((1, 2)) * (64 / masks.shape[1]) ** 2  # @64
     no_eyes = ~classes[:, EYE_IDS].any(1) & ~classes[:, GLASSES_ID]
     no_mouth = ~classes[:, LIP_IDS].any(1) | ~classes[:, NOSE_ID]
     grey = (images.max(-1) - images.min(-1)).mean((1, 2)) < 0.05
