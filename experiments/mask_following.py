@@ -10,8 +10,10 @@ and their stored landmarks (the ceiling).
 ``score`` (detector env, e.g. ``~/.claude/jobs/211c1fe7/tmp/det/bin/python``)
 runs ``hysts/anime-face-detector`` on every image and reports, per checkpoint:
 detection rate, mean landmark error in ``[-1, 1]`` units against the layout the
-image was rendered from (all 28 points; the 12 eye points separately), and the
-IoU between the rasterised detected hulls and the given face / eye masks.
+image was rendered from (all 28 points; eyes, nose and mouth separately), the
+detector's mean keypoint confidence for the nose and mouth points (low
+confidence = the feature is not legibly there), and the IoU between the
+rasterised detected hulls and the given face / eye masks.
 
 Usage::
 
@@ -29,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np  # noqa: E402
 import typer  # noqa: E402
 
-from data.layouts import EYE_A, EYE_B, LayoutPrior, rasterize  # noqa: E402
+from data.layouts import EYE_A, EYE_B, MOUTH, NOSE, LayoutPrior, rasterize  # noqa: E402
 
 app = typer.Typer()
 OUT = Path("runs/ablation/mask_following")
@@ -85,12 +87,18 @@ def score(size: int = 256):
 
     det = create_detector("yolov3", device="cuda:0")
     box = [np.array([0, 0, size - 1, size - 1, 1.0], dtype=np.float32)]
-    cols = ["detected", "err all", "err eyes", "IoU face", "IoU eyes"]
-    print(f"{'set':>12}" + "".join(f"{c:>10}" for c in cols))
+    groups = {
+        "eyes": np.r_[np.arange(28)[EYE_A], np.arange(28)[EYE_B]],
+        "nose": np.array([NOSE]),
+        "mouth": np.arange(28)[MOUTH],
+    }
+    cols = ["detected", "err all", *[f"err {g}" for g in groups]]
+    cols += ["conf nose", "conf mouth", "IoU face", "IoU eyes"]
+    print(f"{'set':>12}" + "".join(f"{c:>11}" for c in cols))
     for f in sorted(OUT.glob("*.npz")):
         d = np.load(f)
         imgs, layouts = d["images"], d["layouts"]
-        errs, errs_eye, iou_f, iou_e, found = [], [], [], [], 0
+        rows, found = [], 0
         for img, lm in zip(imgs, layouts):
             bgr = cv2.cvtColor(
                 cv2.resize(img, (size, size), interpolation=cv2.INTER_CUBIC),
@@ -100,16 +108,24 @@ def score(size: int = 256):
             if not res:
                 continue
             found += 1
-            kp = (res[0]["keypoints"][:, :2] + 0.5) / size * 2.0 - 1.0
+            kp_all = res[0]["keypoints"]
+            kp = (kp_all[:, :2] + 0.5) / size * 2.0 - 1.0
             e = np.linalg.norm(kp - lm, axis=-1)
-            errs.append(e.mean())
-            errs_eye.append(np.concatenate([e[EYE_A], e[EYE_B]]).mean())
             m_det, m_giv = rasterize(kp[None])[0], rasterize(lm[None])[0]
-            iou_f.append(_hull_iou(m_det[..., 0], m_giv[..., 0]))
-            iou_e.append(_hull_iou(m_det[..., 1], m_giv[..., 1]))
+            rows.append(
+                [
+                    e.mean(),
+                    *[e[idx].mean() for idx in groups.values()],
+                    kp_all[groups["nose"], 2].mean(),
+                    kp_all[groups["mouth"], 2].mean(),
+                    _hull_iou(m_det[..., 0], m_giv[..., 0]),
+                    _hull_iou(m_det[..., 1], m_giv[..., 1]),
+                ]
+            )
+        mean = np.mean(rows, axis=0)
         print(
-            f"{f.stem:>12}{found / len(imgs):>10.3f}{np.mean(errs):>10.4f}"
-            f"{np.mean(errs_eye):>10.4f}{np.mean(iou_f):>10.3f}{np.mean(iou_e):>10.3f}"
+            f"{f.stem:>12}{found / len(imgs):>11.3f}"
+            + "".join(f"{v:>11.4f}" for v in mean)
         )
 
 

@@ -284,13 +284,21 @@ class RegionPool(eqx.Module):
 
     @jaxtyped(typechecker=beartype)
     def __call__(
-        self, h: Float[Array, " C H W"], masks: Float[Array, " K H W"]
+        self,
+        h: Float[Array, " C H W"],
+        masks: Float[Array, " K H W"],
+        cast: Float[Array, " K H W"] | None = None,
     ) -> Float[Array, " C H W"]:
-        """Add every region's projected pooled feature back into that region."""
+        """Add every region's projected pooled feature back into that region.
+
+        ``masks`` define the pooling; ``cast`` (default ``masks``) where the
+        projected aggregate is broadcast.
+        """
+        cast = masks if cast is None else cast
         mass = reduce(masks, "k h w -> k 1", "sum") + 1e-6
         pooled = einsum(masks, h, "k h w, c h w -> k c") / mass
         proj = einsum(self.weight, pooled, "k d c, k c -> k d") + self.bias
-        return h + einsum(masks, proj, "k h w, k d -> d h w")
+        return h + einsum(cast, proj, "k h w, k d -> d h w")
 
 
 class UNet(eqx.Module):
@@ -316,6 +324,7 @@ class UNet(eqx.Module):
     out_conv: eqx.nn.Conv2d
     time_mlp: eqx.nn.Sequential
     region_pools: dict[int, RegionPool]
+    pool_dilation: int = eqx.field(static=True)
     cond_channels: int = eqx.field(static=True)
     time_embedding_dim: int
     time_scale: float = eqx.field(static=True)
@@ -349,9 +358,12 @@ class UNet(eqx.Module):
                 used by ``region_pool``.
             region_pool: ``1`` adds ``RegionPool`` layers after the up blocks
                 that produce 16x16 and 32x32 features, using the layout masks
-                in the conditioning channels (regions: face, eyes, mouth, and
-                hair/background = 1 - face).  Needs ``cond_channels = 3``.
-                Identity at init.  ``0`` leaves it out.
+                in the conditioning channels (regions: face, eyes, mouth,
+                nose if ``cond_channels = 4``, and hair/background = 1 - face).
+                ``r > 1`` pools every region from its dilation by ``r - 1``
+                pixels (a ``2r - 1`` max filter at 64x64) while broadcasting
+                into the undilated region.  Identity at init.  ``0`` leaves
+                it out.
             time_scale: Multiplier applied to ``t`` before the sinusoidal
                 embedding; see ``sinusoidal_embeddings``.
         """
@@ -382,15 +394,19 @@ class UNet(eqx.Module):
 
         self.cond_channels = cond_channels
         self.region_pools = {}
+        self.pool_dilation = 2 * (region_pool - 1) + 1 if region_pool else 0
         if region_pool:
-            if cond_channels != 3:
+            if cond_channels not in (3, 4):
                 raise ValueError(
-                    "region_pool needs cond_channels = 3 (face, eyes, mouth)"
+                    "region_pool needs cond_channels 3 (face, eyes, mouth) or 4 (+nose)"
                 )
-            # levels whose up block outputs 16x16 and 32x32 (64 / 2**i)
+            # levels whose up block outputs 16x16 and 32x32 (64 / 2**i);
+            # regions: the mask channels plus hair/background (1 - face)
             for level in (2, 1):
                 if level < n_blocks:
-                    self.region_pools[level] = RegionPool(base_channels * 2**level, 4)
+                    self.region_pools[level] = RegionPool(
+                        base_channels * 2**level, cond_channels + 1
+                    )
 
     @classmethod
     def from_hparams(cls, key: PRNGKeyArray, **hparams) -> "UNet":
@@ -444,14 +460,27 @@ class UNet(eqx.Module):
         regions = None
         if self.region_pools:
             # Conditioning channels sit after the image: [x_t, masks, indicator].
-            m = x_c[3 : 3 + self.cond_channels]  # (3, H, W): face, eyes, mouth
+            m = x_c[
+                3 : 3 + self.cond_channels
+            ]  # (K-1, H, W): face, eyes, mouth[, nose]
             regions = jax.numpy.concatenate([m, 1 - m[:1]], axis=0)  # + hair/bg
+            pool_from = regions
+            if self.pool_dilation > 1:
+                # region_pool > 1: aggregate over a dilated region (max filter of
+                # side 2*(region_pool-1)+1 at 64x64) so that regions of a few
+                # pixels -- the mouth covers ~10 -- pool from more than one cell
+                # at 16x16; the broadcast still lands in the undilated region.
+                d = self.pool_dilation
+                pool_from = jax.lax.reduce_window(
+                    regions, -jax.numpy.inf, jax.lax.max, (1, d, d), (1, 1, 1), "SAME"
+                )
         for i in range(len(self.blocks) - 1, -1, -1):
             x_out = self.blocks[i].up(x_out, skip_values[i], t_embed)
             if regions is not None and i in self.region_pools:
                 h = x_out.shape[1]
-                m_level = reduce(regions, "k (h a) (w b) -> k h w", "mean", h=h, w=h)
-                x_out = self.region_pools[i](x_out, m_level)
+                pool = reduce(pool_from, "k (h a) (w b) -> k h w", "mean", h=h, w=h)
+                cast = reduce(regions, "k (h a) (w b) -> k h w", "mean", h=h, w=h)
+                x_out = self.region_pools[i](x_out, pool, cast)
         return self.out_conv(x_out)
 
     @jaxtyped(typechecker=beartype)

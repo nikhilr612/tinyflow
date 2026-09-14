@@ -130,22 +130,33 @@ def _fill_polygon(canvas: np.ndarray, poly: np.ndarray) -> None:
     canvas[inside] = 1.0
 
 
-def rasterize(lm: np.ndarray, size: int = 64, hi: int = 256) -> np.ndarray:
-    """Rasterise ``(N, 28, 2)`` layouts in ``[-1, 1]`` to ``(N, size, size, 3)`` masks.
+NOSE_RADIUS = 3.0  # px at 64x64: the nose is one landmark, drawn as a disc
 
-    Hulls are filled at ``hi`` resolution and area-averaged down to ``size``,
-    which reproduces the anti-aliased edges of the training masks.
+
+def rasterize(lm: np.ndarray, size: int = 64, hi: int = 256) -> np.ndarray:
+    """Rasterise ``(N, 28, 2)`` layouts in ``[-1, 1]`` to ``(N, size, size, 4)`` masks.
+
+    Channels: face, eyes, mouth (convex hulls of their landmarks) and nose (a
+    disc of ``NOSE_RADIUS`` around the single nose point).  Hulls are filled at
+    ``hi`` resolution and area-averaged down to ``size``, which reproduces the
+    anti-aliased edges of the training masks.  Consumers take the leading
+    ``cond_channels`` channels.
     """
-    out = np.zeros((len(lm), size, size, 3), np.float32)
+    out = np.zeros((len(lm), size, size, 4), np.float32)
     px = (np.clip(lm, -1.2, 1.2) + 1) / 2 * hi  # [-1,1] -> [0, hi]
     f = hi // size
+    ys, xs = np.mgrid[0:hi, 0:hi]
     for i, p in enumerate(px):
-        canvas = np.zeros((hi, hi, 3), np.float32)
+        canvas = np.zeros((hi, hi, 4), np.float32)
         _fill_polygon(canvas[..., 0], _hull(p[FACE]))
         _fill_polygon(canvas[..., 1], _hull(p[EYE_A]))
         _fill_polygon(canvas[..., 1], _hull(p[EYE_B]))
         _fill_polygon(canvas[..., 2], _hull(p[MOUTH]))
-        out[i] = canvas.reshape(size, f, size, f, 3).mean((1, 3))
+        r = NOSE_RADIUS * f
+        canvas[..., 3] = (xs + 0.5 - p[NOSE, 0]) ** 2 + (
+            ys + 0.5 - p[NOSE, 1]
+        ) ** 2 <= r * r
+        out[i] = canvas.reshape(size, f, size, f, 4).mean((1, 3))
     return out
 
 
@@ -199,5 +210,5 @@ class LayoutPrior:
         return from_pose_shape(pose, shape)
 
     def sample_masks(self, n: int, seed: int = 0) -> np.ndarray:
-        """``n`` rasterised layout masks ``(n, 64, 64, 3)`` in ``[0, 1]``."""
+        """``n`` rasterised layout masks ``(n, 64, 64, 4)`` in ``[0, 1]``."""
         return rasterize(self.sample(n, seed))

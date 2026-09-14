@@ -100,7 +100,11 @@ def anime(
     arr = preprocess_all("./data/anime-faces")
     real_stats = compute_real_stats(arr, batch_size=batch_size)
 
-    masks = load_masks(mask_path) if cond_channels > 0 else None
+    masks = load_masks(mask_path)[..., :cond_channels] if cond_channels > 0 else None
+    if masks is not None and masks.shape[-1] < cond_channels:
+        raise ValueError(
+            f"{mask_path} has {masks.shape[-1]} channels, need {cond_channels}"
+        )
     if min_landmark_score > 0:
         # Drop detector-rejected non-faces from *training* only; the FID
         # reference stays the full set so scores remain comparable across runs.
