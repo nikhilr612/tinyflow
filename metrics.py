@@ -71,6 +71,7 @@ def evaluate_fid(
     key: jax.Array,
     n_samples: int = 5000,
     batch_size: int = 128,
+    image_size: int = 64,
 ) -> float:
     """Generate images from model and compute FID against real stats.
 
@@ -83,6 +84,7 @@ def evaluate_fid(
         key: JAX PRNG key.
         n_samples: Number of images to generate.
         batch_size: Batch size for generation and feature extraction.
+        image_size: Side of the square images the model generates.
 
     Returns:
         FID score (lower is better).
@@ -95,7 +97,7 @@ def evaluate_fid(
     for i in tqdm(range(0, n_samples, batch_size), desc="FID"):
         bs = min(batch_size, n_samples - i)
         key, sample_key = jax.random.split(key)
-        noise = jax.random.normal(sample_key, (bs, 64, 64, 3))
+        noise = jax.random.normal(sample_key, (bs, image_size, image_size, 3))
         fid.update(_to_inception_input(model.generate(noise)), real=False)
 
     mu_fake, sigma_fake = fid.get_fake_stats()

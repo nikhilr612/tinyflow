@@ -156,6 +156,7 @@ def run(
                 eval_key,
                 n_samples=run_cfg.fid_n_samples,
                 batch_size=run_cfg.fid_batch_size,
+                image_size=image_shape[0],
             )
             model.n_steps = n_steps
             print(f"\nEpoch {epoch}: FID = {fid:.2f}", flush=True)

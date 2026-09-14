@@ -9,6 +9,8 @@ Note on data format:
     (e.g., ``ImageFM``) do not need to know about this internal detail.
 """
 
+import math
+
 import equinox as eqx
 import jax
 from beartype import beartype
@@ -340,6 +342,7 @@ class UNet(eqx.Module):
         cond_channels: int = 0,
         region_pool: int = 0,
         time_scale: float = 1000.0,
+        image_size: int = 64,
     ):
         """Initialize a denoising U-Net with multiple blocks conditioned on time.
 
@@ -364,6 +367,8 @@ class UNet(eqx.Module):
                 pixels (a ``2r - 1`` max filter at 64x64) while broadcasting
                 into the undilated region.  Identity at init.  ``0`` leaves
                 it out.
+            image_size: Side of the (square) input; decides which up blocks
+                get ``RegionPool`` layers (the ones producing 16x16 and 32x32).
             time_scale: Multiplier applied to ``t`` before the sinusoidal
                 embedding; see ``sinusoidal_embeddings``.
         """
@@ -400,10 +405,11 @@ class UNet(eqx.Module):
                 raise ValueError(
                     "region_pool needs cond_channels 3 (face, eyes, mouth) or 4 (+nose)"
                 )
-            # levels whose up block outputs 16x16 and 32x32 (64 / 2**i);
+            # levels whose up block outputs 16x16 and 32x32 (image_size / 2**i);
             # regions: the mask channels plus hair/background (1 - face)
-            for level in (2, 1):
-                if level < n_blocks:
+            for res in (16, 32):
+                level = int(math.log2(image_size // res))
+                if 0 <= level < n_blocks:
                     self.region_pools[level] = RegionPool(
                         base_channels * 2**level, cond_channels + 1
                     )
@@ -426,6 +432,7 @@ class UNet(eqx.Module):
             "cond_channels",
             "region_pool",
             "time_scale",
+            "image_size",
         }
         return cls(key=key, **{k: v for k, v in hparams.items() if k in known})
 

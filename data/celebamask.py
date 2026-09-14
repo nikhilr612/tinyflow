@@ -114,25 +114,29 @@ def load_images(image_dir: Path, ids: list[int], size: int = 64) -> np.ndarray:
 def main(
     data_dir: str = "data/celebamask-hq/CelebAMask-HQ-Dataset/resized256",
     out_dir: str = ".preprocessed",
+    size: int = 64,
 ):
-    """Write the three arrays described in the module docstring."""
+    """Write the arrays of the module docstring (``_<size>`` suffix unless 64)."""
     src, out = Path(data_dir), Path(out_dir)
+    sfx = "" if size == 64 else f"_{size}"
     out.mkdir(parents=True, exist_ok=True)
     ids = sorted(int(p.stem) for p in (src / "mask-anno-256").glob("*.png"))
     if ids != list(range(len(ids))):
         raise ValueError("expected label maps 0..N-1 in mask-anno-256/")
     print(f"{len(ids)} label maps; the last {N_EVAL} are the eval bank")
-    masks, classes = build_masks([src / "mask-anno-256" / f"{n}.png" for n in ids])
-    np.save(out / "celebamask_masks.npy", masks)
-    np.save(out / "celebamask_eval_masks.npy", masks[-N_EVAL:])
-    images = load_images(src / "images", ids)
-    np.save(out / "celebamask_faces.npy", images)
+    masks, classes = build_masks(
+        [src / "mask-anno-256" / f"{n}.png" for n in ids], size
+    )
+    np.save(out / f"celebamask_masks{sfx}.npy", masks)
+    np.save(out / f"celebamask_eval_masks{sfx}.npy", masks[-N_EVAL:])
+    images = load_images(src / "images", ids, size)
+    np.save(out / f"celebamask_faces{sfx}.npy", images)
     keep = curate(images, masks, classes)
     keep[-N_EVAL:] = False  # the eval bank is never trained on
-    np.save(out / "celebamask_keep.npy", keep)
+    np.save(out / f"celebamask_keep{sfx}.npy", keep)
     print(
-        f"wrote {out}/celebamask_{{faces,masks,eval_masks,keep}}.npy; mean mask area "
-        f"(px @64): {dict(zip(CHANNELS, (masks / 255).sum((1, 2)).mean(0).round(1)))}"
+        f"wrote {out}/celebamask_{{faces,masks,eval_masks,keep}}{sfx}.npy; mean mask "
+        f"area (px): {dict(zip(CHANNELS, (masks / 255).sum((1, 2)).mean(0).round(1)))}"
     )
 
 

@@ -76,6 +76,7 @@ def anime(
     fid_batch_size: int = 256,
     fid_n_steps: int = 16,
     dataset_name: str = "anime",
+    image_size: int = 64,
 ):
     """Train a flow matching model on the anime faces (or CelebAMask-HQ) dataset.
 
@@ -83,7 +84,9 @@ def anime(
     writes: images and four-channel masks (face, eyes, mouth, nose), the
     curation in ``celebamask_keep.npy`` instead of ``--min-landmark-score``,
     and the held-out real label maps as the evaluation layout bank (no
-    layout prior).  ``--mask-path`` defaults per dataset.
+    layout prior).  ``--mask-path`` defaults per dataset.  ``--image-size 128``
+    (CelebA only) uses the ``_128`` arrays ``data/celebamask.py --size 128``
+    writes; the U-Net places its region-pooling layers by resolution.
 
     ``--cond-channels 3`` conditions the model on the cached layout masks at
     ``--mask-path`` (face, eyes, mouth); ``--region-pool 1`` adds the
@@ -108,14 +111,17 @@ def anime(
     if dataset_name not in ("anime", "celeba"):
         raise ValueError(f"unknown --dataset-name {dataset_name!r}")
     celeba = dataset_name == "celeba"
+    if not celeba and image_size != 64:
+        raise ValueError("--image-size is only supported for --dataset-name celeba")
+    sfx = "" if image_size == 64 else f"_{image_size}"
     if celeba:
-        arr = np.load("./.preprocessed/celebamask_faces.npy")
+        arr = np.load(f"./.preprocessed/celebamask_faces{sfx}.npy")
         real_stats = compute_real_stats(
             arr,
             batch_size=batch_size,
-            cache_path="./.preprocessed/celebamask_stats.npz",
+            cache_path=f"./.preprocessed/celebamask_stats{sfx}.npz",
         )
-        mask_path = mask_path or "./.preprocessed/celebamask_masks.npy"
+        mask_path = mask_path or f"./.preprocessed/celebamask_masks{sfx}.npy"
     else:
         arr = preprocess_all("./data/anime-faces")
         real_stats = compute_real_stats(arr, batch_size=batch_size)
@@ -129,7 +135,7 @@ def anime(
     # Curation applies to *training* only; the FID reference stays the full
     # set so scores remain comparable across runs.
     if celeba:
-        keep = np.flatnonzero(np.load("./.preprocessed/celebamask_keep.npy"))
+        keep = np.flatnonzero(np.load(f"./.preprocessed/celebamask_keep{sfx}.npy"))
     elif min_landmark_score > 0:
         keep = curated_indices(load_landmark_scores(), min_landmark_score)
     else:
@@ -142,7 +148,7 @@ def anime(
     )
     eval_masks = None
     if cond_channels > 0 and celeba:
-        bank = np.load("./.preprocessed/celebamask_eval_masks.npy")
+        bank = np.load(f"./.preprocessed/celebamask_eval_masks{sfx}.npy")
         idx = np.random.default_rng(seed).choice(len(bank), 5000)
         eval_masks = bank[idx, ..., :cond_channels].astype(np.float32) / 255.0
     elif cond_channels > 0:
@@ -158,6 +164,7 @@ def anime(
         "out_channels": 3,
         "cond_channels": cond_channels,
         "region_pool": region_pool,
+        "image_size": image_size,
     }
     key = jax.random.key(seed)
     key, sk1 = jax.random.split(key)
