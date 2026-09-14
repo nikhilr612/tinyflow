@@ -8,7 +8,10 @@ models *share* and that the bad one makes more strongly -- hedged detail,
 washed-out regions -- without any condition or extra training; on EDM2 it
 improved FID by 1.5-2x.  For a layout-conditioned model both velocities see the
 same mask.  ``w = 0`` is the unguided reference.  Reports FID (5000 samples,
-16 steps) and edge mass relative to real.
+16 steps) and edge mass relative to real.  ``--refine-t0 > 0`` adds one round
+of re-noise-and-re-solve (``experiments/refine.py``) with the guided velocity
+in both passes; ``--mask-source real`` conditions on training masks instead
+of the prior (the layout-prior-free number).
 
 Usage::
 
@@ -32,7 +35,7 @@ import numpy as np  # noqa: E402
 import PIL.Image as Pilimage  # noqa: E402
 import typer  # noqa: E402
 
-from data.animefaces import preprocess_all, to_uint8  # noqa: E402
+from data.animefaces import load_masks, preprocess_all, to_uint8  # noqa: E402
 from data.layouts import LayoutPrior  # noqa: E402
 from experiments.guidance import edge_mass  # noqa: E402
 from metrics import compute_real_stats, evaluate_fid  # noqa: E402
@@ -51,10 +54,13 @@ class AutoguidedSampler:
         t_lo: float = 0.0,
         t_hi: float = 1.0,
         masks: np.ndarray | None = None,
+        refine_t0: float = 0.0,
+        seed: int = 0,
     ):
-        """``masks``: prior-sampled bank (cycled) for conditioned models."""
+        """``masks``: mask bank (cycled); ``refine_t0``: see the module docstring."""
         self.good, self.w, self.t_lo, self.t_hi = good, w, t_lo, t_hi
         self.masks = None if masks is None else jnp.asarray(masks)
+        self.refine_t0, self._key = refine_t0, jax.random.key(seed)
         self._pos = 0
         t1 = 1.0 - good.t_eps
 
@@ -67,20 +73,20 @@ class AutoguidedSampler:
 
         term = diffrax.ODETerm(velocity)
 
-        def one(x_i, c_i, params):
+        def one(x_i, c_i, params, t_start):
             sol = diffrax.diffeqsolve(
                 term,
                 diffrax.Dopri5(),
-                t0=0.0,
+                t0=t_start,
                 t1=t1,
                 y0=x_i,
                 args=(params, c_i),
-                dt0=t1 / good.n_steps,
+                dt0=(t1 - t_start) / good.n_steps,
                 saveat=diffrax.SaveAt(t1=True),
             )
             return sol.ys[0]
 
-        self._solve = eqx.filter_jit(jax.vmap(one, in_axes=(0, 0, None)))
+        self._solve = eqx.filter_jit(jax.vmap(one, in_axes=(0, 0, None, None)))
 
     def generate(self, x_0):
         """Solve the guided ODE from noise ``x_0``."""
@@ -90,7 +96,15 @@ class AutoguidedSampler:
             self._pos = (self._pos + len(x_0)) % len(self.masks)
             masks = self.masks[idx]
         params = jnp.asarray([self.w, self.t_lo, self.t_hi], dtype=jnp.float32)
-        return self._solve(x_0, self.good._cond(x_0, masks), params)
+        cond = self.good._cond(x_0, masks)
+        x = self._solve(x_0, cond, params, jnp.float32(0.0))
+        if self.refine_t0 <= 0:
+            return x
+        self._key, sk = jax.random.split(self._key)
+        x_t0 = self.refine_t0 * x + (1 - self.refine_t0) * jax.random.normal(
+            sk, x.shape
+        )
+        return self._solve(x_t0, cond, params, jnp.float32(self.refine_t0))
 
 
 def main(
@@ -102,6 +116,8 @@ def main(
     n_steps: int = 16,
     seed: int = 0,
     outdir: str = "runs/ablation/autoguide",
+    refine_t0: float = 0.0,
+    mask_source: str = "prior",
 ):
     """Sweep ``w`` x interval; print FID and edge mass; write a grid and JSON."""
     out = Path(outdir)
@@ -116,16 +132,25 @@ def main(
         raise SystemExit("good and bad models must share the conditioning")
     g.n_steps = n_steps
     masks = None
-    if g.cond_channels:
+    if g.cond_channels and mask_source == "prior":
         masks = LayoutPrior.load().sample_masks(n_fid, seed)[..., : g.cond_channels]
-    sampler = AutoguidedSampler(g, b, masks=masks)
+    elif g.cond_channels:
+        bank = load_masks(
+            mask_source
+            if mask_source != "real"
+            else "./.preprocessed/anime_faces_masks4.npy"
+        )
+        idx = np.random.default_rng(seed).choice(len(bank), n_fid, replace=False)
+        masks = bank[idx, ..., : g.cond_channels].astype(np.float32) / 255.0
+    sampler = AutoguidedSampler(g, b, masks=masks, refine_t0=refine_t0, seed=seed + 3)
     windows = [tuple(float(v) for v in x.split("-")) for x in intervals.split(",")]
     configs = [(0.0, (0.0, 1.0))] + [
         (w, win) for w in (float(v) for v in ws.split(",")) if w > 0 for win in windows
     ]
     grid_noise = jax.random.normal(jax.random.key(seed), (8, 64, 64, 3))
     results, rows = [], []
-    print(f"bad model: {bad}\n{'w':>6}{'window':>12}{'FID':>9}{'edge/real':>11}")
+    print(f"bad: {bad}  masks: {mask_source}  refine_t0: {refine_t0}  steps: {n_steps}")
+    print(f"{'w':>6}{'window':>12}{'FID':>9}{'edge/real':>11}")
     for w, (lo, hi) in configs:
         sampler.w, sampler.t_lo, sampler.t_hi = w, lo, hi
         sampler._pos = 0
@@ -134,6 +159,7 @@ def main(
         s = jnp.clip(sampler.generate(noise), -1, 1)
         edge = float(jax.vmap(edge_mass)(s).mean()) / m_edge_real
         results.append({"w": w, "t_lo": lo, "t_hi": hi, "fid": fid, "edge": edge})
+        sampler._key = jax.random.key(seed + 3)
         sampler._pos = 0
         rows.append(to_uint8(np.clip(np.asarray(sampler.generate(grid_noise)), -1, 1)))
         print(f"{w:>6.2f}{f'{lo:.2f}-{hi:.2f}':>12}{fid:>9.1f}{edge:>11.3f}")
@@ -142,7 +168,18 @@ def main(
         (grid.shape[1] * 2, grid.shape[0] * 2), Pilimage.Resampling.NEAREST
     ).save(out / "grid_w.png")
     with (out / "results.json").open("w") as f:
-        json.dump({"good": good, "bad": bad, "runs": results}, f, indent=2)
+        json.dump(
+            {
+                "good": good,
+                "bad": bad,
+                "mask_source": mask_source,
+                "refine_t0": refine_t0,
+                "n_steps": n_steps,
+                "runs": results,
+            },
+            f,
+            indent=2,
+        )
     print(f"wrote {out}/results.json and grid_w.png (rows = configs in order)")
 
 
