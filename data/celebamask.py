@@ -53,8 +53,8 @@ FACE_AREA = (600.0, 2200.0)
 
 def near_duplicates(images: np.ndarray, threshold: float = 0.995) -> np.ndarray:
     """Bool mask of images that are a later near-copy of an earlier one."""
-    n = len(images)
-    th = images.mean(-1).reshape(n, 16, 4, 16, 4).mean((2, 4)).reshape(n, -1)
+    n, f = len(images), images.shape[1] // 16
+    th = images.mean(-1).reshape(n, 16, f, 16, f).mean((2, 4)).reshape(n, -1)
     th = th - th.mean(1, keepdims=True)
     th /= np.linalg.norm(th, axis=1, keepdims=True) + 1e-8
     later = np.zeros(n, bool)
