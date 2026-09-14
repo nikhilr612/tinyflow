@@ -3,6 +3,7 @@
 from typing import Annotated
 
 import jax
+import numpy as np
 import typer
 
 import data.animefaces
@@ -71,11 +72,18 @@ def anime(
     cond_channels: int = 0,
     cond_dropout: float = 0.0,
     region_pool: int = 0,
-    mask_path: str = "./.preprocessed/anime_faces_masks.npy",
+    mask_path: str = "",
     fid_batch_size: int = 256,
     fid_n_steps: int = 16,
+    dataset_name: str = "anime",
 ):
-    """Train a flow matching model on the anime faces dataset.
+    """Train a flow matching model on the anime faces (or CelebAMask-HQ) dataset.
+
+    ``--dataset-name celeba`` trains on the arrays ``data/celebamask.py``
+    writes: images and four-channel masks (face, eyes, mouth, nose), the
+    curation in ``celebamask_keep.npy`` instead of ``--min-landmark-score``,
+    and the held-out real label maps as the evaluation layout bank (no
+    layout prior).  ``--mask-path`` defaults per dataset.
 
     ``--cond-channels 3`` conditions the model on the cached layout masks at
     ``--mask-path`` (face, eyes, mouth); ``--region-pool 1`` adds the
@@ -97,26 +105,47 @@ def anime(
         f"time_embedding_dim={time_embedding_dim} must be even"
     )
 
-    arr = preprocess_all("./data/anime-faces")
-    real_stats = compute_real_stats(arr, batch_size=batch_size)
+    if dataset_name not in ("anime", "celeba"):
+        raise ValueError(f"unknown --dataset-name {dataset_name!r}")
+    celeba = dataset_name == "celeba"
+    if celeba:
+        arr = np.load("./.preprocessed/celebamask_faces.npy")
+        real_stats = compute_real_stats(
+            arr,
+            batch_size=batch_size,
+            cache_path="./.preprocessed/celebamask_stats.npz",
+        )
+        mask_path = mask_path or "./.preprocessed/celebamask_masks.npy"
+    else:
+        arr = preprocess_all("./data/anime-faces")
+        real_stats = compute_real_stats(arr, batch_size=batch_size)
+        mask_path = mask_path or "./.preprocessed/anime_faces_masks.npy"
 
     masks = load_masks(mask_path)[..., :cond_channels] if cond_channels > 0 else None
     if masks is not None and masks.shape[-1] < cond_channels:
         raise ValueError(
             f"{mask_path} has {masks.shape[-1]} channels, need {cond_channels}"
         )
-    if min_landmark_score > 0:
-        # Drop detector-rejected non-faces from *training* only; the FID
-        # reference stays the full set so scores remain comparable across runs.
+    # Curation applies to *training* only; the FID reference stays the full
+    # set so scores remain comparable across runs.
+    if celeba:
+        keep = np.flatnonzero(np.load("./.preprocessed/celebamask_keep.npy"))
+    elif min_landmark_score > 0:
         keep = curated_indices(load_landmark_scores(), min_landmark_score)
-        print(f"curation: keeping {len(keep)} of {len(arr)} images")
-        arr = arr[keep]
-        masks = None if masks is None else masks[keep]
+    else:
+        keep = np.arange(len(arr))
+    print(f"curation: keeping {len(keep)} of {len(arr)} images")
+    arr = arr[keep]
+    masks = None if masks is None else masks[keep]
     dataset, batches_per_epoch = data.animefaces.wrap_dataset(
         arr, masks, batch_size=batch_size, seed=seed
     )
     eval_masks = None
-    if cond_channels > 0:
+    if cond_channels > 0 and celeba:
+        bank = np.load("./.preprocessed/celebamask_eval_masks.npy")
+        idx = np.random.default_rng(seed).choice(len(bank), 5000)
+        eval_masks = bank[idx, ..., :cond_channels].astype(np.float32) / 255.0
+    elif cond_channels > 0:
         eval_masks = LayoutPrior.load().sample_masks(5000, seed=seed)[
             ..., :cond_channels
         ]

@@ -16,7 +16,8 @@ turns them into the arrays the image track consumes, in the same ``[-1, 1]`` /
 Curation drops what makes the conditioning wrong or the FID reference
 double-counted, nothing else (~1.8%): near-duplicate photos (later copy of a
 pair with cosine > 0.995 between mean-centred 16x16 grey thumbnails), images
-with no eye label and no glasses (the eyes channel is empty), face areas
+with no eye label and no glasses (the eyes channel is empty), likewise no lip
+or no nose label (empty mouth / nose channel), face areas
 outside ``[600, 2200]`` px at 64x64 (alignment failures) and near-greyscale
 images.  Glasses, hats and single-eye profiles stay: their masks describe
 them.  FID reference statistics always use the full set.
@@ -46,7 +47,7 @@ CHANNELS = {
     "nose": (2,),
 }
 N_EVAL = 3000  # the last ids are the layout bank for sampling, never trained on
-EYE_IDS, GLASSES_ID = (4, 5), 3
+EYE_IDS, GLASSES_ID, LIP_IDS, NOSE_ID = (4, 5), 3, (11, 12), 2
 FACE_AREA = (600.0, 2200.0)
 
 
@@ -68,12 +69,14 @@ def curate(images: np.ndarray, masks: np.ndarray, classes: np.ndarray) -> np.nda
     """Training keep-mask; ``classes`` is ``(N, 19)`` bool label presence."""
     face = (masks[..., 0] / 255.0).sum((1, 2))
     no_eyes = ~classes[:, EYE_IDS].any(1) & ~classes[:, GLASSES_ID]
+    no_mouth = ~classes[:, LIP_IDS].any(1) | ~classes[:, NOSE_ID]
     grey = (images.max(-1) - images.min(-1)).mean((1, 2)) < 0.05
     bad_size = (face < FACE_AREA[0]) | (face > FACE_AREA[1])
-    drop = near_duplicates(images) | no_eyes | grey | bad_size
+    drop = near_duplicates(images) | no_eyes | no_mouth | grey | bad_size
     print(
         f"curation: dup {near_duplicates(images).sum()}, no eyes {no_eyes.sum()}, "
-        f"grey {grey.sum()}, size {bad_size.sum()} -> keep {(~drop).sum()}/{len(drop)}"
+        f"no mouth/nose {no_mouth.sum()}, grey {grey.sum()}, size {bad_size.sum()} "
+        f"-> keep {(~drop).sum()}/{len(drop)}"
     )
     return ~drop
 
