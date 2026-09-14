@@ -224,3 +224,4 @@ ztserver.py
 
 # fidax Inception weights (downloaded)
 data/inception_v3_weights_fid.pickle
+data/celebamask-hq/
