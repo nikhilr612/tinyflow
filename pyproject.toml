@@ -53,6 +53,9 @@ ignore = ['F722']
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.uv]
+override-dependencies = ["jax[cuda13]>=0.8.0"]
+
 [dependency-groups]
 dev = [
     "scikit-learn>=1.9.1",

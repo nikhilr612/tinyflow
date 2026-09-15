@@ -1,21 +1,21 @@
 """Paper figures for one training run: curves, sample grids, and a showcase.
 
 Reads a run directory as written by ``training.run`` (``losses.json``,
-``model.eqx`` or ``best_model.eqx``) and writes to ``<run>/figures/``:
+``model.eqx`` or ``best_model.eqx``) and writes to ``<run>/figures/``.
 
-* ``loss_curve.png``, ``fid_curve.png`` -- from ``losses.json``;
-* ``sample_grid.png`` -- 8x8 samples (layouts from the prior for a
-  conditioned model);
-* ``layout_to_image.png`` -- the layout mask each sample was rendered from,
-  above the sample: the conditioning made visible;
-* ``real_vs_generated.png`` -- a row of data, a row of samples;
-* ``interpolation.png`` -- spherical interpolation in noise at a fixed layout;
-* ``iris_pairs.png`` -- eye-region crops, the property ``RegionPool`` fixes;
-* ``showcase.png`` -- all of the above on one page.
+Two commands, one per dataset (masks come from different places):
+
+* ``anime`` -- loss/FID curves, 8x8 samples (layouts from the layout prior
+  for a conditioned model), layout-to-image, real-vs-generated, noise
+  interpolation, iris pairs, and the ``showcase.png`` page;
+* ``celeba`` -- a single ``celeba_grid.png``: row 1 the held-out masks,
+  row 2 the generations rendered from them, row 3 the paired real faces.
+  Layouts cycle from the held-out validation bank, not the GMM prior.
 
 Usage::
 
-    uv run python generate_figures.py RUN_DIR [--checkpoint best_model.eqx]
+    uv run python generate_figures.py anime RUN_DIR [--checkpoint best_model.eqx]
+    uv run python generate_figures.py celeba RUN_DIR [--n-pairs 8]
 """
 
 from __future__ import annotations
@@ -53,6 +53,11 @@ rcParams.update(
 
 EYE_ROWS, EYE_COLS = slice(16, 38), slice(10, 54)  # eye band of the aligned faces
 
+# Overlay palette per mask channel: face red, eyes green, mouth blue, nose yellow.
+OVERLAY_COLORS = np.array(
+    [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]], dtype=np.float32
+)
+
 
 def grid(images: np.ndarray, cols: int) -> np.ndarray:
     """Tile uint8 images ``(N, H, W, 3)`` into ``ceil(N / cols)`` rows."""
@@ -64,9 +69,19 @@ def grid(images: np.ndarray, cols: int) -> np.ndarray:
 
 
 def mask_overlay(masks: np.ndarray) -> np.ndarray:
-    """Render layout masks ``(N, H, W, 3)`` as red/green/blue on grey, uint8."""
-    base = np.full(masks.shape, 128, np.uint8)
-    return np.clip(base * 0.5 + masks * 127, 0, 255).astype(np.uint8)
+    """Render layout masks ``(N, H, W, K)`` in channel colors on grey, uint8.
+
+    The first three channels use the legacy scale (face red, eyes green,
+    mouth blue), kept bit-identical to the original formula; extra channels
+    tint in ``OVERLAY_COLORS`` order (nose yellow).
+    """
+    base = np.full(masks.shape[:-1] + (3,), 128, np.uint8)
+    tint = np.zeros(masks.shape[:-1] + (3,), np.float32)
+    n3 = min(masks.shape[-1], 3)
+    tint[..., :n3] = masks[..., :n3] * 127
+    for i in range(3, masks.shape[-1]):
+        tint += masks[..., i : i + 1] * (OVERLAY_COLORS[i % len(OVERLAY_COLORS)] / 2)
+    return np.clip(base * 0.5 + tint, 0, 255).astype(np.uint8)
 
 
 def curves(history: list[dict], outdir: Path) -> tuple[Path, Path | None]:
@@ -115,6 +130,70 @@ def slerp(a: jnp.ndarray, b: jnp.ndarray, n: int) -> jnp.ndarray:
             for t in ts
         ]
     )
+
+
+app = typer.Typer()
+
+
+def _load_run_model(run: Path, checkpoint: str) -> ImageFM:
+    """Load ``checkpoint`` from ``run``, falling back to ``model.eqx``."""
+    ckpt = run / checkpoint
+    if not ckpt.exists():
+        ckpt = run / "model.eqx"
+    return ImageFM.load(str(ckpt), UNet.from_hparams)
+
+
+@app.command()
+def anime(
+    run_dir: str,
+    checkpoint: str = "model.eqx",
+    n_steps: int = 64,
+    seed: int = 0,
+):
+    """Write every figure for ``run_dir`` into ``run_dir/figures``."""
+    main(run_dir, checkpoint, n_steps, seed)
+
+
+@app.command()
+def celeba(
+    run_dir: str,
+    checkpoint: str = "best_model.eqx",
+    n_pairs: int = 8,
+    n_steps: int = 64,
+    seed: int = 0,
+):
+    """Write ``celeba_grid.png`` for ``run_dir`` into ``run_dir/figures``.
+
+    One 3-row grid over ``n_pairs`` seeded-random pairs from the held-out
+    validation bank: row 1 the masks, row 2 the generations rendered from
+    them, row 3 the paired real faces.  Nothing else is written.
+    """
+    run = Path(run_dir)
+    out = run / "figures"
+    out.mkdir(parents=True, exist_ok=True)
+    model = _load_run_model(run, checkpoint)
+    model.n_steps = n_steps
+    size = int(model.hparams.get("image_size", 64))
+    sfx = "" if size == 64 else f"_{size}"
+    bank = np.load(f"./.preprocessed/celebamask_eval_masks{sfx}.npy")
+    faces = np.load(f"./.preprocessed/celebamask_faces{sfx}.npy")
+    # The bank is the tail of the dataset arrays, so faces pair by offset.
+    offset = len(faces) - len(bank)
+    idx = np.random.default_rng(seed).choice(len(bank), n_pairs, replace=False)
+    refs = to_uint8(faces[offset + idx])
+    masks = None
+    if model.cond_channels:
+        masks = jnp.asarray(
+            bank[idx, ..., : model.cond_channels].astype(np.float32) / 255.0
+        )
+    noise = jax.random.normal(jax.random.key(seed), (n_pairs, size, size, 3))
+    gen = to_uint8(np.clip(np.asarray(model.generate(noise, masks)), -1, 1))
+    rows = [grid(gen, n_pairs), grid(refs, n_pairs)]
+    if masks is not None:
+        rows.insert(0, grid(mask_overlay(np.asarray(masks)), n_pairs))
+    panel = np.concatenate(rows, axis=0)
+    Pilimage.fromarray(panel).save(out / "celeba_grid.png")
+    print(f"wrote celeba_grid.png ({n_pairs} pairs) to {out}/")
 
 
 def main(
@@ -218,4 +297,4 @@ def main(
 
 
 if __name__ == "__main__":
-    typer.run(main)
+    app()

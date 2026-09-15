@@ -98,20 +98,41 @@ def main(
     n_steps: int = 16,
     seed: int = 0,
     outdir: str = "runs/ablation/refine",
+    dataset: str = "anime",
 ):
-    """Sweep ``t0``; print FID and edge mass; write a grid and ``results.json``."""
+    """Sweep ``t0``; print FID and edge mass; write a grid and ``results.json``.
+
+    ``--dataset celeba`` measures against ``celebamask_faces.npy`` and draws
+    conditioned masks from the held-out ``celebamask_eval_masks.npy`` bank.
+    """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    arr = preprocess_all("./data/anime-faces")
-    real_stats = compute_real_stats(arr)
+    if dataset not in ("anime", "celeba"):
+        raise ValueError(f"unknown dataset {dataset!r}")
+    if dataset == "celeba":
+        arr = np.load("./.preprocessed/celebamask_faces.npy")
+        real_stats = compute_real_stats(
+            arr, cache_path="./.preprocessed/celebamask_stats.npz"
+        )
+    else:
+        arr = preprocess_all("./data/anime-faces")
+        real_stats = compute_real_stats(arr)
     real = jnp.asarray(arr[np.random.default_rng(seed).choice(len(arr), 512, False)])
     m_edge_real = float(jax.vmap(edge_mass)(real).mean())
     model = ImageFM.load(checkpoint, UNet.from_hparams)
     model.n_steps = n_steps
+    h = int(model.hparams.get("image_size", 64))
     masks = None
     if model.cond_channels:
-        masks = LayoutPrior.load().sample_masks(n_fid, seed)[..., : model.cond_channels]
-    grid_noise = jax.random.normal(jax.random.key(seed), (8, 64, 64, 3))
+        if dataset == "celeba":
+            bank = np.load("./.preprocessed/celebamask_eval_masks.npy")
+            idx = np.random.default_rng(seed).choice(len(bank), n_fid, replace=True)
+            masks = bank[idx, ..., : model.cond_channels].astype(np.float32) / 255.0
+        else:
+            masks = LayoutPrior.load().sample_masks(n_fid, seed)[
+                ..., : model.cond_channels
+            ]
+    grid_noise = jax.random.normal(jax.random.key(seed), (8, h, h, 3))
     results, rows = [], []
     print(f"{'t0':>6}{'FID':>9}{'edge/real':>11}")
     for t0 in (float(v) for v in t0s.split(",")):
@@ -120,7 +141,7 @@ def main(
         sampler._pos = 0
         s = jnp.clip(
             sampler.generate(
-                jax.random.normal(jax.random.key(seed + 2), (256, 64, 64, 3))
+                jax.random.normal(jax.random.key(seed + 2), (256, h, h, 3))
             ),
             -1,
             1,

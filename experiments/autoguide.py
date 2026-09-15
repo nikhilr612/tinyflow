@@ -118,12 +118,26 @@ def main(
     outdir: str = "runs/ablation/autoguide",
     refine_t0: float = 0.0,
     mask_source: str = "prior",
+    dataset: str = "anime",
 ):
-    """Sweep ``w`` x interval; print FID and edge mass; write a grid and JSON."""
+    """Sweep ``w`` x interval; print FID and edge mass; write a grid and JSON.
+
+    ``--dataset celeba`` measures against ``celebamask_faces.npy``; the
+    ``prior`` mask source is unavailable (no layout prior) and ``real``
+    resolves to the held-out ``celebamask_eval_masks.npy`` bank.
+    """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    arr = preprocess_all("./data/anime-faces")
-    real_stats = compute_real_stats(arr)
+    if dataset not in ("anime", "celeba"):
+        raise ValueError(f"unknown dataset {dataset!r}")
+    if dataset == "celeba":
+        arr = np.load("./.preprocessed/celebamask_faces.npy")
+        real_stats = compute_real_stats(
+            arr, cache_path="./.preprocessed/celebamask_stats.npz"
+        )
+    else:
+        arr = preprocess_all("./data/anime-faces")
+        real_stats = compute_real_stats(arr)
     real = jnp.asarray(arr[np.random.default_rng(seed).choice(len(arr), 512, False)])
     m_edge_real = float(jax.vmap(edge_mass)(real).mean())
     g = ImageFM.load(good, UNet.from_hparams)
@@ -131,23 +145,28 @@ def main(
     if g.cond_channels != b.cond_channels:
         raise SystemExit("good and bad models must share the conditioning")
     g.n_steps = n_steps
+    h = int(g.hparams.get("image_size", 64))
     masks = None
-    if g.cond_channels and mask_source == "prior":
+    if g.cond_channels and mask_source == "prior" and dataset == "anime":
         masks = LayoutPrior.load().sample_masks(n_fid, seed)[..., : g.cond_channels]
+    elif g.cond_channels and mask_source == "prior":
+        raise SystemExit("--dataset celeba has no layout prior; use --mask-source real")
     elif g.cond_channels:
-        bank = load_masks(
-            mask_source
-            if mask_source != "real"
-            else "./.preprocessed/anime_faces_masks4.npy"
+        if dataset == "celeba" and mask_source == "real":
+            default_bank = "./.preprocessed/celebamask_eval_masks.npy"
+        else:
+            default_bank = "./.preprocessed/anime_faces_masks4.npy"
+        bank = load_masks(mask_source if mask_source != "real" else default_bank)
+        idx = np.random.default_rng(seed).choice(
+            len(bank), n_fid, replace=len(bank) < n_fid
         )
-        idx = np.random.default_rng(seed).choice(len(bank), n_fid, replace=False)
         masks = bank[idx, ..., : g.cond_channels].astype(np.float32) / 255.0
     sampler = AutoguidedSampler(g, b, masks=masks, refine_t0=refine_t0, seed=seed + 3)
     windows = [tuple(float(v) for v in x.split("-")) for x in intervals.split(",")]
     configs = [(0.0, (0.0, 1.0))] + [
         (w, win) for w in (float(v) for v in ws.split(",")) if w > 0 for win in windows
     ]
-    grid_noise = jax.random.normal(jax.random.key(seed), (8, 64, 64, 3))
+    grid_noise = jax.random.normal(jax.random.key(seed), (8, h, h, 3))
     results, rows = [], []
     print(f"bad: {bad}  masks: {mask_source}  refine_t0: {refine_t0}  steps: {n_steps}")
     print(f"{'w':>6}{'window':>12}{'FID':>9}{'edge/real':>11}")
@@ -155,7 +174,7 @@ def main(
         sampler.w, sampler.t_lo, sampler.t_hi = w, lo, hi
         sampler._pos = 0
         fid = evaluate_fid(sampler, real_stats, jax.random.key(seed + 1), n_fid)
-        noise = jax.random.normal(jax.random.key(seed + 2), (256, 64, 64, 3))
+        noise = jax.random.normal(jax.random.key(seed + 2), (256, h, h, 3))
         s = jnp.clip(sampler.generate(noise), -1, 1)
         edge = float(jax.vmap(edge_mass)(s).mean()) / m_edge_real
         results.append({"w": w, "t_lo": lo, "t_hi": hi, "fid": fid, "edge": edge})

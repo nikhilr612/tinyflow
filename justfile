@@ -8,6 +8,7 @@
 #   just eyes "name=ckpt" ...       iris-mismatch rate across checkpoints
 #   just samples OUT "name=ckpt"... labelled sample grid from shared noise + layouts
 #   just guidance CKPT [ARGS]       sampling-time edge-guidance sweep
+#   just autoguide GOOD BAD OUTDIR [ARGS]  autoguidance at known-best defaults (w=1, 0-1, 16 steps)
 #   just bottleneck CKPT            where/why a checkpoint falls short (P/R, error maps)
 #   just fid runs/exp_x             FID table across the runs under a directory
 #   just watch                      progress of every running job
@@ -67,6 +68,31 @@ train-bg name epochs *args:
         > runs/{{name}}/train.log 2>&1 &
     @echo "started runs/{{name}}"
 
+# CelebA-64 recipe with the stable LR schedule baked in. The 1e-3 default
+# diverged on this task at epoch 25 (loss 0.043 -> 0.285, FID 41 -> 228;
+# runs/celeba_rp_100), so this bakes in peak 5e-4 with a 2000-step warm-up
+# (~10 epochs at batch 128) and cosine decay to 1%. Extra `main.py anime`
+# flags after EVAL_EVERY override the baked-ins, e.g.
+# `just celeba exp/x 100 25 --seed 50`.
+celeba name epochs eval_every *args:
+    mkdir -p runs/{{name}}
+    uv run main.py anime --dataset-name celeba --outpath runs/{{name}}/model.eqx \
+        --n-epochs {{epochs}} --eval-every {{eval_every}} --early-stop-patience 0 --seed 49 \
+        --base-channels 64 --cond-channels 4 --cond-dropout 0.0 --region-pool 1 \
+        --init-lr 5e-4 --warmup-steps 2000 --lr-end-frac 0.01 {{args}} \
+        2>&1 | tee runs/{{name}}/train.log
+
+# CelebA-128 variant of the above. NOTE: currently OOMs on a 24 GB card
+# (fails to allocate ~15.3 GB); kept for a bigger card or a smaller
+# --fid-batch-size / batch size. See `just celeba` for the 64x64 task.
+celeba128 name epochs eval_every *args:
+    mkdir -p runs/{{name}}
+    uv run main.py anime --dataset-name celeba --image-size 128 --outpath runs/{{name}}/model.eqx \
+        --n-epochs {{epochs}} --eval-every {{eval_every}} --early-stop-patience 0 --seed 49 \
+        --base-channels 64 --cond-channels 4 --cond-dropout 0.0 --region-pool 1 \
+        --init-lr 5e-4 --warmup-steps 2000 --lr-end-frac 0.01 --fid-batch-size 64 {{args}} \
+        2>&1 | tee runs/{{name}}/train.log
+
 # Train the 2-D toy model (fast smoke test of the whole stack).
 toy:
     uv run main.py toy ./data/toycardioid.npy
@@ -99,14 +125,26 @@ samples out *arms:
 guidance ckpt *args:
     uv run python experiments/guidance.py --checkpoint {{ckpt}} {{args}}
 
+#   just autoguide GOOD BAD OUTDIR [ARGS]
+# Autoguidance (Karras et al. 2024): v = v_good + w*(v_good - v_bad).
+# Defaults are the known best (w=1, full 0-1 window, 16 steps); extra ARGS
+# append after and override, e.g. --n-steps 64 --ws 0.5,1,1.5.
+autoguide good bad outdir *args:
+    uv run python experiments/autoguide.py --good {{good}} --bad {{bad}} --ws 1 --intervals 0-1 --n-fid 5000 --n-steps 16 --seed 0 --outdir {{outdir}} {{args}}
+
 # Where and why a checkpoint falls short: error maps, texture deficits, FID floor,
 # precision/recall, worst samples, FID vs sampler steps.
 bottleneck ckpt *args:
     uv run python experiments/bottleneck.py --checkpoint {{ckpt}} {{args}}
 
-# Paper figures and the showcase page for a finished run directory.
+# Paper figures and the showcase page for a finished anime run directory.
+# Extra generate_figures.py flags go after the directory.
 figures run_dir *args:
-    uv run python generate_figures.py {{run_dir}} {{args}}
+    uv run python generate_figures.py anime {{run_dir}} {{args}}
+
+# CelebA mask/generation/reference grid for a finished CelebA run directory.
+figures-celeba run_dir *args:
+    uv run python generate_figures.py celeba {{run_dir}} {{args}}
 
 #   just fid runs/exp_x runs/exp_y
 # FID and final loss for every run under the given directories.

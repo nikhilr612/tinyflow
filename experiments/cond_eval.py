@@ -67,28 +67,50 @@ def main(
     n_eyes: int = 256,
     seed: int = 0,
     n_steps: int = 16,
+    dataset: str = "anime",
 ):
     """Print FID and eye-consistency per mode; write ``<run>/cond_eval.json``.
 
     ``n_steps`` sets the sampler; 16 Dopri5 steps score within 0.5 FID of 64
     on this data (``experiments/bottleneck.py``) at a quarter of the cost.
+    ``--dataset celeba`` evaluates against ``celebamask_faces.npy`` with the
+    held-out ``celebamask_eval_masks.npy`` bank as the ``real`` masks (there
+    is no layout prior, so ``prior`` is unavailable).
     """
-    arr = preprocess_all("./data/anime-faces")
-    real_stats = compute_real_stats(arr)
+    if dataset not in ("anime", "celeba"):
+        raise SystemExit(f"unknown --dataset {dataset!r}")
+    if dataset == "celeba":
+        arr = np.load("./.preprocessed/celebamask_faces.npy")
+        real_stats = compute_real_stats(
+            arr, cache_path="./.preprocessed/celebamask_stats.npz"
+        )
+    else:
+        arr = preprocess_all("./data/anime-faces")
+        real_stats = compute_real_stats(arr)
     model = ImageFM.load(checkpoint, UNet.from_hparams)
     model.n_steps = n_steps
+    h = int(model.hparams.get("image_size", 64))
     k = model.cond_channels
     if k == 0:
         raise SystemExit("not a conditioned model (cond_channels == 0)")
-    masks_real = load_masks()
-    prior = LayoutPrior.load()
+    if dataset == "celeba":
+        masks_real = np.load("./.preprocessed/celebamask_eval_masks.npy")
+        prior = None
+    else:
+        masks_real = load_masks()
+        prior = LayoutPrior.load()
 
     def prior_masks(n, key):
+        assert prior is not None  # unavailable with --dataset celeba
         s = int(jax.random.randint(key, (), 0, 2**31 - 1))
         return jnp.asarray(prior.sample_masks(n, seed=s)[..., :k])
 
     def real_masks(n, key):
-        idx = np.asarray(jax.random.choice(key, len(masks_real), (n,), replace=False))
+        idx = np.asarray(
+            jax.random.choice(
+                key, len(masks_real), (n,), replace=len(masks_real) < n
+            )
+        )
         return jnp.asarray(masks_real[idx, ..., :k].astype(np.float32) / 255.0)
 
     sources = {"uncond": None, "prior": prior_masks, "real": real_masks}
@@ -96,16 +118,19 @@ def main(
     # eye-consistency reference
     m_eye = masks_real[..., EYE_CHANNEL].astype(np.float32).mean(0) / 255.0
     left, right = m_eye.copy(), m_eye.copy()
-    left[:, 32:] = 0
-    right[:, :32] = 0
+    w2 = m_eye.shape[1] // 2
+    left[:, w2:] = 0
+    right[:, :w2] = 0
     idx = np.random.default_rng(seed).choice(len(arr), n_eyes, replace=False)
     d_real = eye_distance(arr[idx], left, right)
     thresh = float(np.quantile(d_real, 0.95))
 
     results = {"real_images": {"eye_mean": float(d_real.mean()), "hetero": 5.0}}
     print(f"{'mode':>8}{'FID':>9}{'eye dist':>10}{'hetero %':>10}")
-    noise = jax.random.normal(jax.random.key(seed + 7), (n_eyes, 64, 64, 3))
+    noise = jax.random.normal(jax.random.key(seed + 7), (n_eyes, h, h, 3))
     for mode in modes.split(","):
+        if mode == "prior" and dataset == "celeba":
+            raise SystemExit("--dataset celeba has no layout prior; use --modes real")
         src = sources[mode]
         sampler = model if src is None else MaskedSampler(model, src)
         fid = evaluate_fid(sampler, real_stats, jax.random.key(seed + 1), n_fid)

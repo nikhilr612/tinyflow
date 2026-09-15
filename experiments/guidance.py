@@ -172,21 +172,42 @@ def main(
     seed: int = 0,
     outdir: str = "runs/ablation/guidance",
     scale: str = "const",
+    dataset: str = "anime",
 ):
-    """Sweep ``lam`` x interval; print FID and edge mass; write grids + JSON."""
+    """Sweep ``lam`` x interval; print FID and edge mass; write grids + JSON.
+
+    ``--dataset celeba`` measures against ``celebamask_faces.npy`` and draws
+    conditioned masks from the held-out ``celebamask_eval_masks.npy`` bank.
+    """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    arr = preprocess_all("./data/anime-faces")
-    real_stats = compute_real_stats(arr)
+    if dataset not in ("anime", "celeba"):
+        raise ValueError(f"unknown dataset {dataset!r}")
+    if dataset == "celeba":
+        arr = np.load("./.preprocessed/celebamask_faces.npy")
+        real_stats = compute_real_stats(
+            arr, cache_path="./.preprocessed/celebamask_stats.npz"
+        )
+    else:
+        arr = preprocess_all("./data/anime-faces")
+        real_stats = compute_real_stats(arr)
     real = jnp.asarray(arr[np.random.default_rng(seed).choice(len(arr), 512, False)])
     m_edge_real = float(jax.vmap(edge_mass)(real).mean())
     print(f"real: edge mass {m_edge_real:.4f}")
 
     model = ImageFM.load(checkpoint, UNet.from_hparams)
     model.n_steps = n_steps
+    h = int(model.hparams.get("image_size", 64))
     masks = None
     if model.cond_channels:
-        masks = LayoutPrior.load().sample_masks(n_fid, seed)[..., : model.cond_channels]
+        if dataset == "celeba":
+            bank = np.load("./.preprocessed/celebamask_eval_masks.npy")
+            idx = np.random.default_rng(seed).choice(len(bank), n_fid, replace=True)
+            masks = bank[idx, ..., : model.cond_channels].astype(np.float32) / 255.0
+        else:
+            masks = LayoutPrior.load().sample_masks(n_fid, seed)[
+                ..., : model.cond_channels
+            ]
     sampler = GuidedSampler(
         model,
         lambda x: jax.nn.relu(m_edge_real - edge_mass(x)) ** 2,
@@ -198,14 +219,14 @@ def main(
     configs = [(0.0, (0.0, 1.0))] + [
         (lam, w) for lam in lam_list if lam > 0 for w in windows
     ]
-    grid_noise = jax.random.normal(jax.random.key(seed), (8, 64, 64, 3))
+    grid_noise = jax.random.normal(jax.random.key(seed), (8, h, h, 3))
     results, rows = [], []
     print(f"\n{'lam':>7}{'window':>12}{'FID':>9}{'edge/real':>11}")
     for lam, (t_lo, t_hi) in configs:
         sampler.lam, sampler.t_lo, sampler.t_hi = lam, t_lo, t_hi
         sampler._pos = 0
         fid = evaluate_fid(sampler, real_stats, jax.random.key(seed + 1), n_fid)
-        noise = jax.random.normal(jax.random.key(seed + 2), (256, 64, 64, 3))
+        noise = jax.random.normal(jax.random.key(seed + 2), (256, h, h, 3))
         s = jnp.clip(sampler.generate(noise), -1, 1)
         edge = float(jax.vmap(edge_mass)(s).mean()) / m_edge_real
         results.append(
