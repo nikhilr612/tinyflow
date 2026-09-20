@@ -64,7 +64,17 @@ and cheaply: low NFE (midpoint-8 is free; the MeanFlow map is the 1–2 NFE bet,
 `runs/mf_rp_100`), then ONNX export + CPU latency numbers.  This branch keeps
 every gory detail.
 
-## 1d. The last task: a CPU Hugging Face Space (decided 2026-09-20, not started)
+## 1d. The HF Space — DONE 2026-09-20 (first version)
+
+Live: https://huggingface.co/spaces/nikhilr01/animefaces-distil-0.03b — sample a
+layout from the prior, nine sliders (pose, eyes, mouth), Generate.  Source in
+`experiments/space/` (+ `DEPLOY.md`); model = the distilled 2-jump map exported
+to ONNX (`runs/distill_rp/sampler_2jump.onnx`, 2 NFE, FID 37.8, ~0.1 s on CPU).
+HF gates free Gradio Spaces to ZeroGPU, hence a never-called `@spaces.GPU`
+placeholder; no GPU is used.  The Space is the demo of whatever the winner
+becomes: re-export and re-upload when the model changes (`DEPLOY.md`).
+
+Original brief, for reference:
 
 After the rewrite: a Gradio demo on a CPU Space with the winner's checkpoint
 and the layout prior (`landmark_prior.npz`).  Flow: a button samples a layout
@@ -77,6 +87,23 @@ checkpoint and displays it.  CPU only, so the sampler must be the cheap one
 wins), and the inference code should be the exported model (ONNX / numpy), not
 the training stack.  Simplicity is the criterion: one `app.py`, the weights,
 the prior, a short README.
+
+## Priorities (2026-09-20 evening): (1) the instability diagnosis (§1c), then
+(3) the winner call and the minimal rewrite (§1b).  Deferred: improving the
+distilled map further, and touching the Space again (only if the rewrite's
+model is better).
+
+## 1e. Flow maps and NFE (2026-09-20; METHODS §3.3–3.4)
+
+Midpoint-8 (16 NFE) matches Dopri5-16 (~96 NFE); midpoint-4 (8 NFE) is 28.1 on
+the plain model.  MeanFlow fine-tunes diverged three ways (derivative
+bootstrapping from a sharp-in-t velocity model); the shortcut objective is
+stable but saturates (1-jump 91, 2-jump 77); **fixed-teacher distillation**
+(`experiments/distill_map.py`, 100 k midpoint-8 trajectories, plain L2 on the
+jumps 0→1, 0→½, ½→1) gives 1-jump 53 / 2-jump 37.8 in 35 epochs
+(`runs/distill_rp`).  Its cheap next lever: more pairs, longer.  ONNX export:
+`experiments/export_onnx.py` (onnxruntime is ~9× faster than XLA-CPU per
+evaluation; 2 jumps = 99 ms at 2 threads).
 
 ## 1c. Two debts to pay before the rewrite (added 2026-09-20)
 

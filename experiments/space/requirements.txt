@@ -1,0 +1,5 @@
+gradio
+numpy
+onnxruntime
+pillow
+spaces
