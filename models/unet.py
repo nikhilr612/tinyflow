@@ -331,6 +331,7 @@ class UNet(eqx.Module):
     region_pools: dict[int, RegionPool]
     span_proj: eqx.nn.Linear | None
     pool_dilation: int = eqx.field(static=True)
+    mask_input: int = eqx.field(static=True)
     cond_channels: int = eqx.field(static=True)
     time_embedding_dim: int
     time_scale: float = eqx.field(static=True)
@@ -348,6 +349,7 @@ class UNet(eqx.Module):
         time_scale: float = 1000.0,
         image_size: int = 64,
         flow_map: int = 0,
+        mask_input: int = 1,
     ):
         """Initialize a denoising U-Net with multiple blocks conditioned on time.
 
@@ -383,6 +385,11 @@ class UNet(eqx.Module):
                 projection of its sinusoidal embedding added to the time
                 embedding, so at init -- and whenever ``s = t`` -- the network
                 is exactly the plain velocity model.  ``0`` leaves it out.
+            mask_input: ``1`` (default) feeds the conditioning channels into
+                the network with the image, so every layer sees the layout;
+                ``0`` strips them before ``in_conv`` so the layout reaches the
+                network *only* through the ``RegionPool`` layers (an ablation
+                of where the conditioning enters).
         """
         n_out = out_channels or in_channels
         if cond_channels and in_channels != n_out + cond_channels + 1:
@@ -391,7 +398,9 @@ class UNet(eqx.Module):
                 f" = {n_out + cond_channels + 1}"
             )
         sk1, sk2, key = jax.random.split(key, num=3)
-        self.in_conv = eqx.nn.Conv2d(in_channels, base_channels, 3, padding=1, key=sk1)
+        self.mask_input = mask_input
+        conv_in = in_channels if mask_input else n_out
+        self.in_conv = eqx.nn.Conv2d(conv_in, base_channels, 3, padding=1, key=sk1)
         self.out_conv = eqx.nn.Conv2d(base_channels, n_out, 1, key=sk2)
         self.time_embedding_dim = time_embedding_dim
         self.time_mlp = eqx.nn.Sequential(
@@ -450,6 +459,7 @@ class UNet(eqx.Module):
             "time_scale",
             "image_size",
             "flow_map",
+            "mask_input",
         }
         return cls(key=key, **{k: v for k, v in hparams.items() if k in known})
 
@@ -481,7 +491,8 @@ class UNet(eqx.Module):
             t_feat = t_feat + self.span_proj(self.sinusoidal_embeddings(s - t))
         t_embed = self.time_mlp(t_feat)
         x_c = rearrange(x, "h w c -> c h w")
-        x_in = self.in_conv(x_c)
+        n_img = self.out_conv.out_channels
+        x_in = self.in_conv(x_c if self.mask_input else x_c[:n_img])
         skip_values: list[Array] = []
         for i in range(len(self.blocks)):
             skip_values.append(x_in)

@@ -22,7 +22,7 @@ is open and closed.
 ## 0. Setup and notation
 
 **Data.** 21 551 anime faces, 64×64×3, values in `[-1, 1]` (`data/animefaces.py`).
-Augmentation: horizontal flip (p = 0.5), colour jitter.  Semantic masks
+Augmentation: horizontal flip (p = 0.5), colour jitter (on in every run below; ablated in §7.3 on 2026-09-21: off is 3 FID better, and the winner drops it).  Semantic masks
 `(N, 64, 64, 3)` = convex hulls of `hysts/anime-face-detector` landmarks (channel
 0 face, 1 both eyes, 2 mouth); 28 landmarks per face with per-point confidences
 (`experiments/extract_landmarks.py`).  **Curation** (§8.1): images with mean
@@ -576,6 +576,38 @@ Both models follow the layout closely (100 % detection; eye error 0.027 ≈ 0.9 
 at 64 px); region pooling tightens nose and mouth placement by ~10 % and raises the
 detector's confidence in those features, but the remaining gap to real on nose /
 mouth legibility (0.64 vs 0.82) is the larger effect and is not a layout problem.
+
+**Where the layout enters** (`mask_input`, 2026-09-20; same recipe, seed 49,
+40 epochs, FID 16 steps with prior layouts, iris on 256 samples):
+
+| masks enter | loss | FID | iris mismatch |
+|---|---|---|---|
+| input concat + RegionPool (recipe) | **0.0766** | 52.3 | 3.5 % |
+| RegionPool only (`mask_input=0`) | 0.0790 | **49.5** | 3.1 % |
+
+**Confirmed on the baseline's own schedule** (`runs/maskin/mi0_200s125`:
+200-epoch cosine, FID every 25, stopped after epoch 125 = the baseline's best
+point, ∑lr matched; a 120-epoch cosine had trailed by 2–4 FID purely because it
+integrates ~30 % less learning rate):
+
+| epoch 124/125 | loss | FID train-time | eval prior / real | iris (5000) | iris (256) |
+|---|---|---|---|---|---|
+| masks at input + RegionPool (`wide_rp_200`) | 0.0646 | 32.9 | 32.9 / 31.4 | 4.3 % | 4.3 % |
+| **RegionPool only** (`mask_input=0`) | 0.0760 | **31.4** | **31.9 / 31.7** | 3.9 / 4.3 % | **1.6 %** |
+
+**Colour jitter, same setting** (`mi0_nojit_200s125`, flips only): training FID
+46.5 / 34.2 / 30.7 / 30.7 / **28.0** at epochs 24…124 (vs 59.7 / 38.7 / 34.0 /
+32.6 / 31.4 with jitter); eval **28.8 / 28.3**, iris 3.5 % (2.7 % on 256).  The
+jittered model learns the jittered photometric marginals and FID is against the
+clean images; the gap is largest early (the broader target is also harder to
+fit) and 3 FID at the end.  Jitter is dropped from the recipe.
+
+Equal FID, smaller prior-vs-real gap, iris agreement as good or better, at a
+much higher training loss: the input masks make the denoising objective easier
+without making the samples better.  **Adopted for the winner**: the U-Net's
+input is the image alone; the layout enters only through the RegionPool layers
+(drops 3 mask channels + the indicator).  Runs: `runs/maskin/mi{0,1}` (40 ep),
+`mi0_120`, `mi0_200s125`.
 
 **Definition change.** The first implementation updated `h` sequentially over
 regions (later regions pooled features already offset by earlier ones; regions

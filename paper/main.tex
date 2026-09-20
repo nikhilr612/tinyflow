@@ -212,13 +212,15 @@ conditioned model the conditioning token is held fixed along the trajectory.
 \begin{figure}[t]
 \centering
 \diagram{architecture}{\linewidth}
-\caption{The velocity network. Input: $x_t$ with the three layout-mask channels. Four encoder levels (ResBlock doubling the channels, then a
-$2\times2$ stride-2 depthwise convolution), a bare $4^2\times1024$ tensor with no
-mid block, four decoder levels (bilinear $\uparrow2$ and a $3\times3$ convolution,
-concatenation of the skip, ResBlock halving the channels). Skips run from the
-\emph{input} of each encoder level to the decoder level after its upsample
-(Fig.~\ref{fig:skips}). Region pooling follows the decoder levels producing
-$16^2$ and $32^2$. Time enters every ResBlock through adaLN-Zero; the output is
+\caption{The velocity network. The image $x_t$ is the only input to the U-Net;
+the layout masks $m$ enter solely through the region-pooling layers after the
+decoder levels producing $16^2$ and $32^2$. Four encoder levels (ResBlock doubling
+the channels, then a $2\times2$ stride-2 depthwise convolution), a bare
+$4^2\times1024$ tensor with no mid block, four decoder levels (bilinear
+$\uparrow2$ and a $3\times3$ convolution, concatenation of the skip, ResBlock
+halving the channels). Skips run from the \emph{input} of each encoder level to the
+decoder level after its upsample (Fig.~\ref{fig:skips}). One shared time embedding
+$e(t)$ feeds a separate adaLN-Zero projection in every ResBlock; the output is
 $\hat x$ with no activation, and the velocity is derived from it.}
 \label{fig:architecture}
 \end{figure}

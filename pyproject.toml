@@ -28,7 +28,7 @@ include = ["data*", "models*"]
 
 [tool.ruff]
 # The demo Space runs in its own environment (gradio, spaces, onnxruntime).
-extend-exclude = ["experiments/space"]
+extend-exclude = ["experiments/space", "paper"]
 
 [tool.ruff.lint]
 extend-select = [
@@ -66,4 +66,4 @@ dev = [
 ]
 
 [tool.ty.src]
-exclude = ["experiments/space"]
+exclude = ["experiments/space", "paper"]

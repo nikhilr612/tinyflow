@@ -228,3 +228,4 @@ data/celebamask-hq/
 
 *.md
 raw_context.txt
+paper/figures/*.png

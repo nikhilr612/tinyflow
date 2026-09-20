@@ -77,6 +77,8 @@ def anime(
     mask_path: str = "",
     flow_map: int = 0,
     flow_map_frac: float = 0.5,
+    mask_input: int = 1,
+    color_jitter: int = 1,
     fid_batch_size: int = 256,
     fid_n_steps: int = 16,
     dataset_name: str = "anime",
@@ -173,8 +175,13 @@ def anime(
     print(f"curation: keeping {len(keep)} of {len(arr)} images")
     arr = arr[keep]
     masks = None if masks is None else masks[keep]
+    aug = data.animefaces.AugmentationConfig()
+    if not color_jitter:  # flips only; jitter widens the photometric marginals
+        aug = data.animefaces.AugmentationConfig(
+            brightness_max=0.0, contrast_range=(1.0, 1.0), saturation_range=(1.0, 1.0)
+        )
     dataset, batches_per_epoch = data.animefaces.wrap_dataset(
-        arr, masks, batch_size=batch_size, seed=seed
+        arr, masks, batch_size=batch_size, seed=seed, aug_config=aug
     )
     eval_masks = None
     if cond_channels > 0 and celeba:
@@ -196,6 +203,7 @@ def anime(
         "region_pool": region_pool,
         "image_size": image_size,
         "flow_map": flow_map,
+        "mask_input": mask_input,
     }
     key = jax.random.key(seed)
     key, sk1 = jax.random.split(key)
@@ -205,7 +213,7 @@ def anime(
         loaded = ImageFM.load(init_from, UNet.from_hparams)
         # Older checkpoints lack keys that were added with their default
         # value later (image_size, flow_map); compare with defaults filled in.
-        defaults = {"image_size": 64, "flow_map": 0}
+        defaults = {"image_size": 64, "flow_map": 0, "mask_input": 1}
         old = {**defaults, **loaded.hparams}
         if {k: v for k, v in old.items() if k != "flow_map"} != {
             k: v for k, v in hparams.items() if k != "flow_map"
