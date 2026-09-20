@@ -1,223 +1,101 @@
 # Handoff — where things stand and what to do next
 
-Written 2026-09-13 23:35 while the final run was still training.  Everything
-below is on branch `feat/pixel-unet`; the full experiment tree (including every
-dropped variant) is on `exp/aux-loss-campaign`.
+Updated 2026-09-20.  Branch `feat/pixel-unet`; the full experiment tree (including
+every dropped variant) is on `exp/aux-loss-campaign`.  `experiments/METHODS.md` is
+the record of every number; `paper/main.tex` (18 pages, builds clean) is the
+write-up; `CONTEXT.md` (untracked) is a narrative of how the campaign went.
 
-## 0. Final-run result (2026-09-13 23:54) and the recipe it implies
+## 0. Results, one table
 
-`runs/wide_rp_300` finished: 300 effective epochs in three segments.  Final
-evaluation (16-step sampler, 5000 samples): **FID 37.8 with prior layouts / 34.2 with
-real layouts; iris mismatch 4.7 % / 4.7 % (real data 5.0 %)**; final loss 0.0557.
-Training-time FID over the last segment (cumulative epochs ~147/197/247/297):
-47.8 / 34.9 / 36.2 / 37.5 — best at ~200 cumulative epochs, drifting up after.
-`runs/wide_rp_300/best_model.eqx` is that epoch-99-of-segment-3 checkpoint (34.9)
-and is the one to use / report alongside the final.
+All FID: 5000 samples, 16 Dopri5 steps, prior layouts unless stated.  Anime
+checkpoints live in `runs/archive/9aef10c/` (loadable at tag `ckpt-9aef10c`;
+`runs/<name>/*.archived.txt` says which); CelebA checkpoints are in `runs/celeba_*`.
 
-Reading: the eye result is solved and reproduced (6.6 → 6.25 → 4.7 %); layout
-adherence is strong (`figures/layout_to_image.png`); FID is *not* better than the
-plain 200-epoch unconditioned model (31.4 at the same sampler) and the prior-vs-real
-layout gap (3.5 FID) opened as adherence sharpened.  Confounds: two warm restarts
-in the schedule; no schedule-matched unconditioned control yet (§5.7).
+| model | FID | iris mismatch | METHODS |
+|---|---|---|---|
+| plain unconditioned, constant LR, 200 ep (`wide_noaux`) | 32.0 | 35.5 % | 3.1 |
+| plain unconditioned, warm-up + cosine, 200 ep (`ctrl_sched`, the control) | **29.3** | — | 7.4 |
+| cond + region pool, 3 segments, 300 ep (`wide_rp_300`); `best_model` | 37.8 / 34.6 | 4.7 % | 7.4 |
+| cond + region pool, one segment, 200 ep (`wide_rp_200/best_model`, ep 124) | 32.9 (31.4 real layouts) | 4.3 % | 7.4 |
+| + edge guidance λ = 0.02 | 32.5 | | 4.1 |
+| + refinement t0 = 0.85 | 31.8 | | 7.5 |
+| + **autoguidance** w = 1, bad = `confirm_rp` (40 ep) | **21.2** (`wide_rp_300/best`) / **18.1** (`wide_rp_200/best`) | not re-measured | 4.2 |
+| CelebAMask-HQ 64 px, cond + RP, 120 ep (`celeba_rp_120`) | 27.3 (real layouts) | n/a | 10 |
+| + autoguidance w = 0.8, bad = `celeba_rp_100/best` | **18.6** | | 10 |
 
-**Recipe for the next run of this architecture** — the turning point is near 200
-cumulative epochs (~33 k steps at batch 128), not 100:
+The story: region pooling fixes iris agreement (35 % → 4.3 %) and tightens
+layout-following at a 3.5-FID cost against the schedule-matched control; the
+conditioned model drifts up after epoch ~125 while the control is flat;
+autoguidance is the largest lever found (−13 anime, −9 CelebA) and takes the
+region-pool model 11 FID past the control.  Every number is in METHODS.md with the
+command that produced it.
 
-    just paper NAME 200 25          # one segment, cosine ending at 200, FID every 25
+## 1. What was done on 2026-09-20
 
-then use `runs/NAME/best_model.eqx` (best training-time FID), evaluate it with
-`just eval`, and report best and final.  Do not chain warm restarts; if a run must
-be resumed, resume with `--n-epochs` set to the *remaining* epochs so the cosine
-ends where the run ends, and say so in the write-up.
+- Wrote up everything the 2026-09-14 overnight queue produced (guidance / bottleneck /
+  mask-following / refinement on `wide_rp_300/best`, `ctrl_sched`, `wide_rp_200`),
+  autoguidance (`runs/ablation/autoguide/*`, `runs/wide_rp_200_autoguide`) and
+  CelebA-64 (`runs/celeba_rp_{100,120}`, `runs/celeba_autoguide`) into METHODS.md
+  (§4.1, §4.2, §5, §7.3, §7.4, §7.5, §9, new §10) and the paper (abstract, §10.1
+  autoguidance, §11, §12, §13 + §13.1, new §14 CelebA, decisions, bibliography).
+- CelebA-128: the 2026-09-14 OOM was the train step (17.1 GiB) against JAX's
+  default 75 % preallocation (17.15 GiB), not FID.  `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95`
+  makes it run (verified: one epoch ≈ 4 min + FID at `--fid-batch-size 64`).
+  **Stopped by decision** — not worth its cost class.  `just celeba128` still
+  exists; prefix the env var if it is ever wanted.
 
-## 0b. Overnight queue (started 2026-09-14 01:05) — read `runs/chain_night.log` first
+## 2. Open questions, ranked (METHODS.md §9)
 
-`runs/chain_night.sh` runs these in order; each line in `runs/chain_night.log`
-marks a stage finished, `ALL_DONE` at the end (expected ≈ 06:30).
+1. **Autoguidance, properly.**  (a) Which guide: the separately trained 40-epoch
+   `confirm_rp` beats epoch 49 of the same run by 5 FID at every w — try a
+   narrower model (`--base-channels 32`), a shorter one (20 ep), a data-fraction
+   one.  (b) Re-measure iris mismatch, mask-following, precision/recall at w = 1
+   (`cond_eval.py` / `mask_following.py` need an `AutoguidedSampler` hook; the
+   class is in `experiments/autoguide.py`).  (c) Does the *plain* model
+   (`ctrl_sched` with a 40-epoch plain guide) gain as much?  This decides whether
+   "conditioning + RP + autoguidance" is one recipe or two orthogonal ones.
+   All post-hoc on saved checkpoints; ~15 min per FID point.
+2. **The conditioned model's late drift.**  Real landmarks + jitter as the layout
+   source instead of the DP-GMM prior, or simply report `best_model`.
+3. EDM-style augmentation conditioning (hair/eye hue rotation) — the one
+   dataset-specific coverage prior.  Judge on recall.
+4. Spatial mixing at 16×16 as a zero-init fine-tune from `wide_rp_200/best`.
+5. Hair-colour consistency metric; flip-equivariant sampling (free).
 
-| stage | output | what to look at |
-|---|---|---|
-| edge guidance on `best_model.eqx` | `runs/ablation/guidance_final.log`, `guidance_final/` | FID per (λ, window); λ=0 gives 34.6 |
-| precision / recall etc. | `runs/ablation/bottleneck_final/REPORT.md` | recall vs 0.154, precision vs 0.521 of the plain model |
-| mask-following score | `runs/ablation/mask_following.log` | landmark error / hull IoU: `rp_best` vs `no_rp` vs `real` |
-| refinement sweep | `runs/ablation/refine.log`, `refine/grid_t0.png` | FID vs t0; t0=0 is the reference |
-| `ctrl_sched` | `runs/ctrl_sched/losses.json` | plain unconditioned model, same schedule/length: the missing FID control |
-| `wide_rp_200` | `runs/wide_rp_200/{cond_eval.json,figures/}` | the recipe as recommended (one segment, cosine to 200, FID/25) |
+Closed — do not re-run (evidence in METHODS.md): any pixel-space loss on x̂ vs x_1;
+FM re-weightings from x_1; mask-prediction head; global code; standard skips;
+layout conditioning as a FID lever; palette losses; batch 256; >16 sampler steps;
+refinement stacked on autoguidance; upscalers; CelebA-128.
 
-Then: put the numbers into METHODS.md (§4 guidance, §5 bottleneck, §7.3 layout
-control, new §7.5 refinement, §7.4 control) and the paper (§9, §10, §12, §13),
-rebuild, commit.  `just fid runs/ctrl_sched runs/wide_rp_200` prints the curves.
+## 3. Things you need to know that are not obvious from the code
 
-## 1. What is running / where it ends up
-
-`just paper wide_rp_300 200 50 --init-from runs/wide_rp_300_ep98.eqx` was launched
-at 22:27 (third segment of the 300-epoch run; see §4).  At 23:34 it was at epoch
-167/200, loss 0.0570, FID 47.8 / 34.9 / 36.2 at epochs 49 / 99 / 149 (16-step
-sampler, prior layouts).  When training ends the recipe runs `just eval` and
-`just figures` automatically.  Expected finish ≈ 23:55.
-
-Outputs (all under `runs/wide_rp_300/`):
-
-| file | what |
-|---|---|
-| `model.eqx`, `model.eqx.hparams` | final EMA weights (effective epoch ≈ 298) |
-| `best_model.eqx` | best training-time FID checkpoint of this segment |
-| `losses.json` | per-epoch loss + FID for this segment (epochs 0–199 of the segment) |
-| `cond_eval.json`, `cond_eval.log` | final FID with prior / real layouts + iris-mismatch rate |
-| `figures/showcase.png` + individual panels | the paper figures |
-| `train.log`, `../paper.log` | logs |
-
-Earlier segments of the same run are kept beside it: `runs/wide_rp_300_ep49.eqx`
-(+ `runs/wide_rp_300_losses_collapsed.json`: the 100 epochs of the first attempt,
-which diverged at epoch 80) and `runs/wide_rp_300_ep98.eqx`
-(+ `runs/wide_rp_300_losses_seg2.json`: 49 epochs of the second segment).
-
-**If it died:** `just watch` shows nothing and `runs/wide_rp_300/cond_eval.json`
-is missing.  Check `runs/paper.log` and `runs/wide_rp_300/train.log` (grep for
-`Error`).  A `cuSolver` error means the GPU was shared during FID — never run
-anything else on the GPU while a `paper` run is going.  Resume with
-`just paper wide_rp_300 <remaining> 50 --init-from runs/wide_rp_300/model.eqx`
-(copy the checkpoint aside first).
-
-## 2. Immediate to-dos (in order)
-
-1. **Read the result**: `cat runs/wide_rp_300/cond_eval.json`, open
-   `runs/wide_rp_300/figures/showcase.png`.  Reference numbers to compare with:
-   200-epoch unconditioned wide model FID 32.0 (64-step) / 31.4 (16-step), iris
-   mismatch 35.5 %; 40-epoch region-pool model FID 48–52, mismatch 6.3–6.6 %; real
-   data mismatch 5–6 %.
-2. **Run the extra evaluations** on the final checkpoint (GPU must be free):
-   - `just bottleneck runs/wide_rp_300/model.eqx` → precision/recall, error maps,
-     worst samples (`runs/ablation/bottleneck/REPORT.md`).  Compare recall with 0.154.
-   - `just guidance runs/wide_rp_300/model.eqx --lams 0,0.02,0.05 --intervals 0-1,0.5-1`
-     → guided FID (expect −2 to −4).  Report guided numbers separately.
-   - `just eyes "final=runs/wide_rp_300/model.eqx" "wide200=runs/exp_long/wide_noaux/model.eqx"`
-     → iris mismatch side by side.
-   - Optional: eye-chroma distribution (the snippet is in the session log; ~10 lines:
-     mask-weighted mean (Cb, Cr) inside the eye mask, saturation mean/std, 8-bin hue
-     histogram, real vs generated).
-3. **Fill in the paper**: `paper/main.tex` §13 ("Final training run → Results") has a
-   red `\todo`; replace it with the numbers from step 1–2 and rebuild:
-   `cd paper && latexmk -pdf main.tex && latexmk -c`.  The showcase figure is picked
-   up automatically once `runs/wide_rp_300/figures/showcase.png` exists.
-4. **Update `experiments/METHODS.md`**: add a §7.4 with the final-run numbers, the
-   three-segment schedule story (§4 below), and the confirmation run
-   (`runs/confirm_rp`: mismatch 6.25 %, FID 52.1/51.4, loss 0.0815 on the parallel
-   RegionPool).  Also add the eye-chroma check (real sat 0.137±0.071, region-pool
-   model 0.121±0.067; hue histograms match) under §7.3.
-5. **Commit**: `git add paper experiments/METHODS.md HANDOFF.md && git commit`.
-   `paper/` is untracked right now (the `.tex`, a `.gitignore` for LaTeX by-products,
-   and the built PDF — commit the PDF or not as you prefer).
-
-## 2b. Layout control — a second finding to quantify (do this early)
-
-Visually, the region-pool model follows its layout mask far more closely than the
-no-RP conditional model (`runs/exp_cond/rp_vs_nodrop.png`).  Mechanism: without RP
-the layout enters only at the input and is washed out by four GroupNorm stages and
-the bottleneck (the SPADE observation); RP re-injects the mask *shape* inside the
-decoder at 16×16 and 32×32 (`m_k ⊗ W_k ē_k` is region-shaped), so the layer gives
-both cross-region agreement (irises) and layout adherence.  Three measurements turn
-this into a claim (all post-hoc on saved checkpoints; the detector needs the GPU):
-
-1. **Mask-following score**: run `experiments/extract_landmarks.py`-style detection
-   (detector env: `~/.claude/jobs/211c1fe7/tmp/det/bin/python`) on 512 samples from
-   the no-RP model (`runs/exp_cond/nodrop`, archive branch code) and the RP model
-   (`runs/wide_rp_300`), each rendered from known prior layouts; report mean
-   landmark error and eye/face-hull IoU against the given layout, with real images
-   vs their own masks as the ceiling.
-2. **Layout-editing figure**: same noise, a sequence of edited layouts (eyes moved,
-   spaced, face widened, mouth opened) → samples tracking the edit.  `data/layouts.py`
-   has `to_pose_shape` / `from_pose_shape` / `rasterize`; edit in shape space.
-3. **Change locality**: two layouts differing only in the eye region → |Δsample|
-   should concentrate in the eye region for the RP model.
-
-Add the results to METHODS.md §7.3 and the paper §12; "controllable layout" is a
-stronger headline than the iris rate alone.
-
-## 3. The codebase in one paragraph
-
-Pixel-space flow matching with x-prediction (`models/imagefm.py`), a 4-level U-Net
-(`models/unet.py`) with the legacy skip layout, conditioned on a 3-channel layout
-mask (face / eyes / mouth hulls from detector landmarks) concatenated to `x_t`, plus
-`RegionPool` layers at 16×16 and 32×32 that pool decoder features per region and
-broadcast a zero-initialised projection back — this is what fixes iris-colour
-agreement.  Layouts at sampling time come from `data/layouts.py:LayoutPrior`
-(PDM + PCA + Gaussian mixture, fitted by `experiments/landmark_prior.py`, stored at
-`.preprocessed/landmark_prior.npz`).  `training.py` owns bookkeeping (checkpoints,
-sample PNGs, FID with a prior-mask bank at 16 sampler steps, `losses.json`).  The
-loss has **no auxiliary terms** — read `experiments/METHODS.md` §1–2 before adding
-any; the derivation and the ablations are there.  `CLAUDE.md` is up to date.
-
-`just` recipes: `paper`, `train`, `train-bg`, `eval`, `eyes`, `samples`, `guidance`,
-`bottleneck`, `figures`, `fid`, `watch`, `prior`, `landmarks`, `check`.
-
-## 4. Things you need to know that are not obvious from the code
-
-- **Learning rate.** Constant 1e-3 is at the edge of stability for the 37M model:
-  three runs with added modules diverged in one epoch (mid-attention at epoch 12,
-  standard skips from epoch 3, the first paper run at epoch 80: loss 0.078 → 0.284).
-  The schedule (500-step warm-up, cosine to 1 % of peak) was added in response and is
-  now the default.  Constant 3e-4 gives lower loss but worse 30-epoch FID; it was not
-  adopted.
-- **The 300-epoch run is three segments** (49 constant-LR + 49 cosine + 200 cosine),
-  each resumed from the previous EMA weights with a fresh optimiser (`--init-from`).
-  The LR was near its peak at both cut points, so it approximates one long cosine.
-  Say so in the paper; the loss logs of all three segments are kept.
-- **FID noise** at 30 epochs is ±4 (two seeds: 56.5 vs 52.7).  Loss is stable to
-  ±0.0003 and is the sensitive statistic for architecture changes.  Anything within
+- **Learning rate.** Constant 1e-3 diverges in one epoch on the 37M model once
+  anything is added (four times now, incl. CelebA at epoch 25).  Warm-up + cosine
+  is the default; `just celeba` bakes in 5e-4 / 2000-step warm-up.  If a run must
+  be resumed, `--n-epochs` is the *remaining* epochs (the cosine is computed from
+  it) and the resumed segment is its own schedule — say so in any write-up.
+- **Use `best_model.eqx`**, not the final weights, for the conditioned model; the
+  FID turning point is near epoch 125 of a 200-epoch cosine.
+- **FID noise** at 30 epochs is ±4; loss is stable to ±0.0003.  Anything within
   5 FID needs a second seed or a longer horizon.
-- **16-step FID** is within 0.5 of 64-step on this model; training-time and
-  screening FID use 16.  Reported "paper" numbers: state the step count.
-- **Two GPU jobs at once** → OOM or cuSolver failure at the FID stage.  Don't.
-- **`UNet.from_hparams`** ignores unknown hparam keys so checkpoints from the archive
-  branch load; but checkpoints trained with the *sequential* RegionPool
-  (`runs/exp_cond/nodrop_rp`) evaluate differently on the parallel layer (mean
-  |Δx̂| = 0.008).  Load those on the archive branch if exact numbers matter.
-- **The detector environment** (needed only to regenerate landmarks/masks) lives in
-  `~/.claude/jobs/211c1fe7/tmp/det/` — a job scratch directory that can be deleted.
-  If you need it long-term, copy it or note the recipe: `anime_face_detector`
-  (hysts), `cv2`, torch+CUDA.
-- **Iris-mismatch metric** is validated (flagged samples are genuine mismatches) but
-  crude; it is uncorrelated with FID, so always report both.
+- **One GPU job at a time.**  A second job during an FID stage → OOM / cuSolver
+  failure.  `XLA_PYTHON_CLIENT_MEM_FRACTION=0.47` if two must share.
+- **Checkpoint compatibility.**  `UNet.from_hparams` ignores unknown keys, but
+  the archive's anime checkpoints predate the nose channel / 4-channel masks —
+  load them at tag `ckpt-9aef10c` if exact numbers matter (`runs/archive/9aef10c/README.md`).
+  The sequential-RP checkpoint (`nodrop_rp`) differs from the parallel layer by
+  mean |Δx̂| = 0.008.
+- **Detector environment** (only for regenerating landmarks / mask-following
+  scores): `~/.claude/jobs/211c1fe7/tmp/det/bin/python` — a scratch dir that can
+  vanish; recipe: `anime_face_detector` (hysts), `cv2`, torch + CUDA.
+- **`*.md` is gitignored** (since a578517) but the tracked ones (this file,
+  README, METHODS, CELEBAMASK_SCOPE) stay tracked; `git add -f` for a new one.
+- **Iris-mismatch metric** is validated but crude and uncorrelated with FID;
+  always report both.
 
-## 5. What to try next (ranked; each is a 30–40-epoch screen on the recipe unless noted)
+## 4. `just` recipes
 
-The measured bottleneck of the unconditioned 200-epoch model is **coverage**
-(precision 0.52, recall 0.15 vs ceiling 0.77/0.77).  Re-measure on the final model
-first (step 2 above); the ranking assumes it holds.
-
-1. **Longer training with the schedule** — the curve was still falling at 200
-   epochs.  Resume the final checkpoint for +200–300 epochs with a fresh cosine
-   (`just paper wide_rp_600 300 50 --init-from runs/wide_rp_300/model.eqx`).
-   Cheapest likely gain.
-2. **Augmentation conditioning (EDM-style)** with hair/eye hue rotation — the one
-   dataset-specific *coverage* prior (hair/iris colour is exchangeable in anime).
-   Needs: the augmentation parameters fed to the network (concatenate to the time
-   embedding) so they don't leak into samples.  Judge on recall.
-3. **Spatial mixing at 16×16** (attention or a token-mixing MLP), zero-init, with
-   the schedule — the mid-attention failure was optimisation, not attention.  Try as
-   a fine-tune from the final checkpoint (all additions are zero-init, so the
-   augmented model starts identical).
-4. **Hair-colour consistency metric** (same construction as the iris metric with
-   the hair/background region) to see whether region pooling also fixed hair.
-5. **Flip-equivariant sampling** — `v_sym = ½[v(x) + flip(v(flip x))]`; 10-minute
-   test, no training.
-6. Width 128 (2× again) if compute allows; the rank analysis says width is being used.
-7. **Schedule control for FID**: the final run is FID-neutral vs the plain 200-epoch
-   unconditioned model so far (36.2 at cumulative epoch ~247 vs 32.0 at 200); the
-   missing control is a plain unconditioned run on the same warm-up+cosine schedule
-   and length (`just train ctrl_sched 300 --base-channels 64 --eval-every 50`).
-
-Closed — do not re-run (evidence in METHODS.md): any pixel-space loss on x̂ vs x_1,
-gated or not; FM re-weightings from x_1; the mask-prediction head; the global code;
-standard skips; layout conditioning as a *FID* lever; palette losses; batch 256.
-
-## 6. Paper
-
-`paper/main.tex` (14 pages, builds clean with `latexmk -pdf`).  Sections: data,
-model (layer-level), region pooling, layout prior, optimisation, protocol, aux-loss
-theory (two propositions), offline tests, ablations, scaling, guidance, bottleneck,
-failed variants, conditioning results, final run, decisions summary.  The only
-placeholder is the final-run results paragraph.  If you extend it, the numbers in
-every table are also in `experiments/METHODS.md` with the commands that produced
-them.
+`paper NAME EPOCHS EVERY` (train → eval → figures), `train`, `train-bg`, `celeba`,
+`celeba128`, `eval CKPT`, `eyes`, `samples`, `guidance CKPT`, `autoguide GOOD BAD
+OUTDIR`, `bottleneck CKPT`, `figures RUN`, `figures-celeba RUN`, `fid DIRS`,
+`watch`, `prior`, `landmarks`, `check`, `clean-caches`.

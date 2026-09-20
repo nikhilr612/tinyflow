@@ -29,7 +29,7 @@
   \IfFileExists{\figdir#1}{\includegraphics[width=#2]{\figdir#1}}{\fbox{\parbox{#2}{\centering\vspace{2em}\texttt{#1}\\(produced by \texttt{just paper})\vspace{2em}}}}}
 
 \title{\textbf{Layout-Conditioned Flow Matching with Mask-Guided Region Pooling\\for Anime Face Generation:\\A Complete Record of Methods and Decisions}}
-\author{tinyflow project \\ \texttt{feat/pixel-unet}, September 2026}
+\author{tinyflow project \\ \texttt{feat/pixel-unet}, September 2026 (updated 2026-09-20)}
 \date{}
 
 \begin{document}
@@ -51,10 +51,16 @@ hulls from a landmark detector), sampled at test time from a Gaussian-mixture pr
 a point-distribution model of the landmarks, together with \emph{mask-guided region
 pooling}---a zero-initialised layer that pools decoder features inside each semantic
 region and broadcasts a projection back into that region only. It reduces the rate of
-mismatched iris colours from $34\%$ to the data's own $6\%$ at slightly better FID.
-We also report where the model fails (coverage: recall $0.15$ against a real-vs-real
-ceiling of $0.77$), a sampling-time edge-guidance that recovers $3$--$8$ FID without
-retraining, and the learning-rate instability that shaped the final training schedule.
+mismatched iris colours from $35\%$ to the data's own $4$--$5\%$ at a cost of $3.5$ FID
+against a schedule-matched unconditioned control. We also report where the model fails
+(coverage: recall $0.15$ against a real-vs-real ceiling of $0.77$), the learning-rate
+instability that shaped the final training schedule, and three sampling-time methods
+that need no retraining: edge guidance ($-2$ to $-8$ FID), re-noise-and-re-solve
+refinement ($-3$), and \emph{autoguidance} with a 40-epoch checkpoint of the same
+recipe as the guide ($34.6\to21.2$; $33.2\to18.1$ on the best checkpoint), which
+takes the layout-conditioned model $11$ FID past the unconditioned control. The
+recipe transfers to CelebAMask-HQ at $64\times64$ with real label maps as layouts
+(FID $27.3$, $18.6$ with autoguidance).
 \end{abstract}
 
 % =====================================================================
@@ -591,7 +597,52 @@ $31.4\to28.1$. Restricting guidance to a $t$-interval \citep{kynkaanniemi2024int
 helps slightly: on the $9.4$\,M model $\lambda=0.05$ on $t\in(0.5,1)$ gives $57.8$,
 while $(0,0.5)$ is the worst window ($61.4$). Guidance raises precision
 ($0.52\to0.58$) and leaves recall at $0.15$: a mode-seeking correction, which bounds its
-value at a few FID. Cost: one backward pass per network evaluation.
+value at a few FID. Cost: one backward pass per network evaluation. On the
+region-pool model of \S\ref{sec:final} (\texttt{best\_model.eqx}, $34.6$) the gain is
+the same: $32.5$ at $\lambda=0.02$ on the full window, $32.8$--$33.6$ for the other
+$(\lambda,\text{window})$ pairs; precision $0.47\to0.49$, recall $0.125\to0.108$.
+
+\subsection{Autoguidance}\label{sec:autoguide}
+
+\citet{karras2024autoguidance} guide a model with a worse version of itself,
+\begin{equation}
+v = v_{\text{good}} + w\,(v_{\text{good}} - v_{\text{bad}}),
+\end{equation}
+where $v_{\text{bad}}$ is a smaller or less-trained model of the same family: the
+extrapolation removes the errors the two models share and the bad one makes more
+strongly. For a layout-conditioned model both velocities see the same mask; the cost is
+one extra forward pass per evaluation and no training
+(\texttt{experiments/autoguide.py}). Good model: \texttt{wide\_rp\_300/best\_model.eqx}
+($34.6$ unguided), 5{,}000 samples, 16 steps, prior layouts.
+
+\begin{center}\small
+\begin{tabular}{llcccccc}
+\toprule
+bad model & window & $w{=}0.5$ & $0.75$ & $1$ & $1.25$ & $1.5$ & $2$ \\
+\midrule
+\texttt{confirm\_rp} (same recipe, 40 ep, FID 52) & $(0,1)$ & 24.9 & 22.0 & \textbf{21.2} & 23.3 & 29.7 & 56.9 \\
+\texttt{confirm\_rp} & $(0.3,1)$ & 26.6 & & 23.1 & & & 44.7 \\
+epoch 49 of the same run & $(0,1)$ & 28.9 & & 26.5 & & & 51.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At the optimum ($w=1$, full window): 64 sampler steps give the same $21.2$; real
+layouts $20.8$ (vs $34.0$ unguided, so the prior-vs-real gap is unchanged); edge mass
+rises from $0.90$ to $1.08$ of real; on the best checkpoint of the one-segment run
+(\S\ref{sec:final}, $33.2$ unguided) the result is $\mathbf{18.1}$. Three readings.
+(i) $-13$ FID is three to four times the gain of any energy guidance and moves the
+layout-conditioned model from $3.5$ FID behind the schedule-matched unconditioned control
+to $11$ ahead of it. (ii) The guide must be bad in the right way: a separately trained
+40-epoch checkpoint of the same recipe beats epoch 49 of the \emph{same} run---which
+shares the good model's initialisation and early trajectory---by $5$ FID at every $w$.
+(iii) The response is sharp above $w=1$ (collapse at $2$), and restricting the window,
+which helped energy guidance, hurts here. The rise in edge mass says what is being
+corrected: the hedged, low-contrast detail that \S\ref{sec:bottleneck} identifies as the
+model's characteristic error, which an under-trained model makes more strongly. Combining
+with one refinement round (\S\ref{sec:refine}) \emph{hurts} ($25.2$). Iris mismatch,
+precision/recall and mask-following under autoguidance have not yet been re-measured.
+The result reproduces on a second dataset (\S\ref{sec:celeba}).
 
 % =====================================================================
 \section{Where the model fails}\label{sec:bottleneck}
@@ -618,6 +669,14 @@ what is missing is diversity, which no per-sample loss supplies.
 \paragraph{Eyes.} Iris mismatch $35.5\%$ on this model (\S\ref{sec:eyemetric}), i.e.\ a
 long-range colour-coupling failure that FID does not see and that motivated
 \S\ref{sec:layout}.
+
+\paragraph{Region-pool model.} The same analysis on \texttt{wide\_rp\_300/best\_model.eqx}
+(\S\ref{sec:final}): precision $0.471$, recall $0.125$---the same coverage picture,
+slightly worse on both axes at a similar FID. With the layout given, the
+variance-normalised error at $t=0.3$ is even across regions (face $0.32$, eyes $0.30$,
+mouth $0.33$, hair $0.23$; the mouth is no longer the outlier), and the local-statistics
+deficit is a uniform $-9$ to $-12\%$ on edge mass, luma and chroma std: the layout
+removes the \emph{where} uncertainty and leaves the hedging.
 
 % =====================================================================
 \section{Architecture variants that did not help}\label{sec:arch}
@@ -682,6 +741,30 @@ model matches real data in spread (saturation std $0.067$ vs $0.071$; $C_b$, $C_
 $85$--$95\%$ of real) and in hue histogram (same dominant blue-green band, $32\%$ in
 both), so the layer enforces \emph{agreement}, not a particular colour.
 
+\paragraph{Mask-following.} Does the model draw the face where the layout says?
+512 prior layouts are rendered by each model, the landmark detector is re-run on the
+samples, and the detected landmarks are scored against the layout the image was
+rendered from (\texttt{experiments/mask\_following.py}; real images against their own
+landmarks are the ceiling).
+
+\begin{center}\small
+\begin{tabular}{lcccc}
+\toprule
+model & landmark error all / eyes / nose / mouth & det.\ conf.\ nose / mouth & IoU face / eyes \\
+\midrule
+conditional, no region pool (40 ep) & 0.052 / 0.027 / 0.101 / 0.062 & 0.57 / 0.71 & 0.918 / 0.830 \\
+conditional + region pool (\texttt{best\_model}) & \textbf{0.046 / 0.026 / 0.091 / 0.053} & \textbf{0.64 / 0.75} & \textbf{0.931 / 0.850} \\
+real & 0 & 0.82 / 0.85 & 1 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both models follow the layout closely (100\% detection; the eye error of $0.027$ in
+$[-1,1]$ units is under one pixel at $64$\,px). Region pooling tightens nose and mouth
+placement by $\approx10\%$ and raises the detector's confidence in those features, but
+the remaining gap to real in nose/mouth legibility ($0.64$ vs $0.82$) is the larger
+effect and is not a layout problem.
+
 % =====================================================================
 \section{Final training run}\label{sec:final}
 
@@ -716,14 +799,54 @@ height track the mask in every sample). Against the plain unconditioned 200-epoc
 end and $\approx3.5$ behind at its best point, while solving the eye defect outright;
 the prior-vs-real layout gap ($3.5$ FID), absent at 40 epochs ($50.7$ vs $50.1$),
 opened as adherence sharpened, which points at a residual mismatch between the prior's
-layouts and the data's as one component of the deficit. Two confounds remain open: the
-two warm restarts in the schedule, and the absence of a schedule-matched unconditioned
-control; the precision/recall of the final checkpoint was not measured (the guided
-stage of the analysis exceeded GPU memory at the batch size used). Off-the-shelf
+layouts and the data's as one component of the deficit. Off-the-shelf
 anime super-resolution models (Real-ESRGAN variants, APISR) were tried on the samples
 for presentation and dropped: trained on clean-then-degraded pairs, they render the
 generator's own errors as confident detail, and the native $64\times64$ samples read
 better.
+
+\paragraph{The two confounds, resolved.} Two further 200-epoch runs, each one segment
+of warm-up plus cosine with FID every 25 epochs: \texttt{ctrl\_sched}, the plain
+unconditioned model on the same schedule (the missing control), and
+\texttt{wide\_rp\_200}, the region-pool recipe as recommended above.
+
+\begin{center}\small
+\begin{tabular}{lcccccccc|c}
+\toprule
+epoch & 24 & 49 & 74 & 99 & 124 & 149 & 174 & 199 & final loss \\
+\midrule
+plain, same schedule (\texttt{ctrl\_sched}) & 64.1 & 38.2 & 30.6 & 30.8 & 29.1 & 29.5 & 29.5 & \textbf{29.3} & 0.0789 \\
+conditional + region pool (\texttt{wide\_rp\_200}) & 58.9 & 37.9 & 35.0 & 33.1 & \textbf{32.9} & 34.5 & 36.5 & 37.8 & 0.0537 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\texttt{wide\_rp\_200/best\_model.eqx} (epoch 124) evaluates at FID $32.9$ with prior
+layouts, $31.4$ with real layouts, iris mismatch $4.3\%$ under either. Three
+conclusions. The schedule alone is worth $\approx2.7$ FID on the plain model
+($32.0\to29.3$), whose curve is flat from epoch 75. The one-segment run reproduces the
+three-segment one (best $32.9$ vs $34.9$, final $37.8$ vs $37.8$): the warm restarts
+were not the cause of the drift. The drift after epoch $\approx125$ is real and specific
+to the conditioned model---its loss keeps falling ($0.065\to0.054$) while the control's
+loss and FID are both flat---so the layout-conditioned region-pool model stands $3.5$
+FID behind the matched plain model at its best point and $8.5$ behind at the end, at
+$4.3\%$ iris mismatch against $35\%$. The drift is consistent with the model's growing
+reliance on the region-pool broadcast (its contribution to $\xh$ triples over training),
+which renders the prior's imperfect layouts more literally: the prior-vs-real gap is
+$1.5$ FID at the best checkpoint and $3.5$ at the end. Autoguidance
+(\S\ref{sec:autoguide}) more than recovers the deficit: $18.1$ on this checkpoint.
+
+\subsection{Re-noise-and-re-solve refinement}\label{sec:refine}
+
+A finished sample is re-noised to $t_0$, $x_{t_0}=t_0\,x+(1-t_0)\,\epsilon$, and the ODE
+is solved again from $t_0$ with the same layout (SDEdit, \citealp{meng2022sdedit}, on
+the model's own output; one round of Restart sampling, \citealp{xu2023restart}).
+On \texttt{best\_model.eqx} with 16 steps per pass: $t_0=0/0.5/0.7/0.85$ gives FID
+$34.6/33.8/32.8/\mathbf{31.8}$ with edge mass unchanged ($0.89$--$0.90$ of real).
+Unlike guidance it adds no contrast; it is a second draw of the late-decided detail.
+It does not stack with autoguidance ($21.2\to25.2$ with one round at $t_0=0.85$: the
+guided field is already off the model's own manifold, and refinement pulls it back).
+It remains the in-distribution alternative to the external upscalers above.
 
 \begin{figure}[t]
 \centering
@@ -735,6 +858,39 @@ interpolation at a fixed layout, and eye-region crops.}
 \end{figure}
 
 % =====================================================================
+\section{Second dataset: CelebAMask-HQ}\label{sec:celeba}
+
+Does the recipe transfer to real faces? CelebAMask-HQ \citep{lee2020maskgan} provides
+30{,}000 aligned CelebA-HQ faces with 19-class segmentation maps; we use the 256\,px
+mirror, area-averaged to $64\times64$, and build the
+four-channel layout from label unions: face (skin, nose, brows, eyes, lips, mouth,
+glasses), eyes, mouth (lips and interior), nose; region pooling adds $1-\text{face}$ as
+before (\texttt{data/celebamask.py}). Curation drops $1.8\%$ (duplicate thumbnails,
+empty eye/mouth/nose masks, mis-aligned or greyscale images), leaving 26{,}487. No
+layout prior is fitted: sampling-time layouts are the real label maps of a held-out bank
+(the last 3{,}000 ids, never trained on), so every number below is in the ``real
+layouts'' mode; FID statistics are the full 30{,}000 images. At $64$\,px the two eyes
+together cover one $16\times16$ cell ($14\times$ smaller than anime eyes), so the iris
+mechanism is barely testable at this size; a $128$\,px run (arrays built, fits the
+GPU at a $0.95$ memory fraction) was not pursued, being a different cost class for a
+question the anime result already answers.
+
+\paragraph{Training.} Same architecture ($37$\,M, \texttt{cond\_channels 4},
+\texttt{region\_pool 1}), batch 128. At a constant $10^{-3}$ the run diverged at epoch
+25 (loss $0.043\to0.285$, FID $41\to228$), the same failure as the anime run and earlier;
+with a $5\times10^{-4}$ peak, a 2{,}000-step warm-up and cosine decay, 120 epochs reach
+FID $39.9/27.3/27.3$ at epochs $39/79/119$ and a final loss of $0.036$
+(\texttt{just celeba}). The FID curve is flat from epoch 80: with real layouts there is
+no prior mismatch to render, and no late drift.
+
+\paragraph{Autoguidance.} Good model: the 120-epoch checkpoint ($27.4$ unguided);
+bad model: the epoch-24 checkpoint of the diverged constant-LR run (FID $41$). FID at
+$w=0.8/0.9/1.0$: $\mathbf{18.6}/19.1/20.3$, edge mass $1.07/1.10/1.13$ of real
+($0.96$ unguided). The anime result (\S\ref{sec:autoguide}) reproduces with a different
+mask source and a different guide: $-9$ FID, optimum near $w=1$, edge mass crossing real
+at the optimum.
+
+% =====================================================================
 \section{Decisions and their evidence (summary)}\label{sec:decisions}
 
 \begin{itemize}[leftmargin=1.5em,itemsep=1pt]
@@ -743,34 +899,42 @@ interpolation at a fixed layout, and eye-region crops.}
       \S\ref{sec:theory} is why none are used.
 \item \textbf{No auxiliary losses}: Prop.~1--2, Tables~\ref{tab:gate}--\ref{tab:edge},
       the 200-epoch wash. Closed at both widths.
-\item \textbf{Guidance instead}: $-3$ to $-8$ FID, $\lambda\approx0.02$, middle/late
-      window; reported separately from unguided numbers.
+\item \textbf{Guidance instead}: edge guidance $-2$ to $-8$ FID at $\lambda\approx0.02$;
+      refinement $-3$ at $t_0=0.85$; \textbf{autoguidance $-13$} with a 40-epoch
+      checkpoint of the same recipe at $w=1$---the largest single gain measured, and
+      reproduced on CelebAMask-HQ ($-9$). All reported separately from unguided numbers.
 \item \textbf{GroupNorm (8 groups), zero-init adaLN, no output gate, no final activation,
       time scale $10^3$}: documented in code; the zero-init adaLN is why every added
       module (region pool, global code) can be identity at initialisation.
 \item \textbf{Legacy skips kept}: neutral at $9.4$\,M, unstable at $37$\,M.
 \item \textbf{Width 64, batch 128, 16-step evaluation, curation on}: \S\ref{sec:scaling},
       \S\ref{sec:protocol}.
-\item \textbf{Warm-up + cosine}: three single-epoch divergences at constant $10^{-3}$.
+\item \textbf{Warm-up + cosine}: four single-epoch divergences at constant $10^{-3}$
+      (three anime, one CelebA); worth $2.7$ FID on the plain model by itself.
 \item \textbf{Pure conditional (no dropout)}: dropout $\approx7$ FID at the screening
       horizon; the prior makes the unconditional mode unnecessary.
 \item \textbf{Region pooling at $16\times16$ and $32\times32$, four regions, zero-init,
       parallel form}: \S\ref{sec:layout}; the only structural change with a reproduced,
-      metric-validated win.
+      metric-validated win (iris mismatch $35\%\to4.3$--$4.7\%$, mask-following up), at
+      $3.5$ FID against the schedule-matched control before guidance and $11$ FID ahead
+      of it after autoguidance.
 \item \textbf{Layout prior: PDM + PCA(99\%) + DP-GMM}: Table~\ref{tab:prior}; sampling
       is numpy-only.
 \end{itemize}
 
-\paragraph{Open.} Coverage (recall $0.15$) is the largest remaining gap and moves with
-steps and capacity; EDM-style augmentation conditioning with hair/eye hue rotation (a
-dataset-specific coverage prior, semantically valid only for this domain), spatial
-mixing at $16\times16$ with warm-up, a hair-colour consistency metric for the
-region-pool layer, flip-equivariant sampling, and re-noise-and-re-solve refinement
-of finished samples with the model's own prior (SDEdit, \citealp{meng2022sdedit};
-Restart sampling, \citealp{xu2023restart}; implemented in
-\texttt{experiments/refine.py}, results pending) as the in-distribution alternative
-to external upscalers. Shelved with reasons recorded: structured
-output heads (line/fill, palette) as precision-side bets with a representational risk.
+\paragraph{Open.} (1) Autoguidance is under-explored: which guide (epoch, width,
+data fraction) is best---a separately trained 40-epoch checkpoint beats an early
+checkpoint of the same run by $5$ FID; whether the iris rate, mask-following and recall
+survive $w=1$; and whether the plain model gains as much (if not, conditioning, region
+pooling and autoguidance are one recipe; if so, autoguidance is orthogonal). (2) The
+conditioned model's late-training drift: a better layout prior (real landmarks with
+jitter) or stopping at the FID-optimal checkpoint. (3) Coverage (recall $0.15$) remains
+the largest gap of the unguided model and moves with steps and capacity; EDM-style
+augmentation conditioning with hair/eye hue rotation (a dataset-specific coverage prior,
+semantically valid only for this domain), spatial mixing at $16\times16$ with warm-up,
+a hair-colour consistency metric for the region-pool layer, and flip-equivariant
+sampling. Shelved with reasons recorded: structured output heads (line/fill, palette) as
+precision-side bets with a representational risk.
 
 % =====================================================================
 \section*{Reproducibility}
@@ -790,12 +954,17 @@ J.~Graham. Active shape models---their training and application. \emph{CVIU}, 19
 probabilistic models. \emph{NeurIPS}, 2020.
 \bibitem[Ho \& Salimans(2022)]{ho2022cfg} J.~Ho, T.~Salimans. Classifier-free diffusion
 guidance. arXiv:2207.12598, 2022.
+\bibitem[Karras et al.(2024)]{karras2024autoguidance} T.~Karras, M.~Aittala, T.~Kynkäänniemi,
+J.~Lehtinen, T.~Aila, S.~Laine. Guiding a diffusion model with a bad version of itself.
+\emph{NeurIPS}, 2024.
 \bibitem[Kynkäänniemi et al.(2019)]{kynkaanniemi2019pr} T.~Kynkäänniemi, T.~Karras,
 S.~Laine, J.~Lehtinen, T.~Aila. Improved precision and recall metric for assessing
 generative models. \emph{NeurIPS}, 2019.
 \bibitem[Kynkäänniemi et al.(2024)]{kynkaanniemi2024interval} T.~Kynkäänniemi et al.
 Applying guidance in a limited interval improves sample and distribution quality in
 diffusion models. \emph{NeurIPS}, 2024.
+\bibitem[Lee et al.(2020)]{lee2020maskgan} C.-H. Lee, Z.~Liu, L.~Wu, P.~Luo. MaskGAN:
+towards diverse and interactive facial image manipulation. \emph{CVPR}, 2020.
 \bibitem[Li \& He(2026)]{li2026jit} T.~Li, K.~He. Back to basics: let denoising
 generative models denoise (JiT). \emph{CVPR}, 2026.
 \bibitem[Lipman et al.(2023)]{lipman2023fm} Y.~Lipman, R.~T.~Q. Chen, H.~Ben-Hamu,
