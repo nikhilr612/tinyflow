@@ -209,6 +209,6 @@ class LayoutPrior:
         shape = coef @ self.pca_components + self.pca_mean + self.shape_mean
         return from_pose_shape(pose, shape)
 
-    def sample_masks(self, n: int, seed: int = 0) -> np.ndarray:
-        """``n`` rasterised layout masks ``(n, 64, 64, 4)`` in ``[0, 1]``."""
-        return rasterize(self.sample(n, seed))
+    def sample_masks(self, n: int, seed: int = 0, size: int = 64) -> np.ndarray:
+        """``n`` rasterised layout masks ``(n, size, size, 4)`` in ``[0, 1]``."""
+        return rasterize(self.sample(n, seed), size=size)

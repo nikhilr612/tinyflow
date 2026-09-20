@@ -54,13 +54,28 @@ def eye_distance(x: np.ndarray, left: np.ndarray, right: np.ndarray) -> np.ndarr
     return np.linalg.norm(ml - mr, axis=-1)
 
 
-def main(arms: list[str], n: int = 256, seed: int = 0, n_steps: int = 16):
+def main(
+    arms: list[str],
+    n: int = 256,
+    seed: int = 0,
+    n_steps: int = 16,
+    image_size: int = 64,
+    batch: int = 64,
+):
     """Print one row per real half and per ``name=path`` checkpoint.
 
     Layout-conditioned checkpoints are sampled with masks from the prior.
+    ``--image-size 128`` scores against the upscaled 128 px data and masks
+    (see ``main.py``); samples are generated ``batch`` at a time.
     """
-    arr = preprocess_all("./data/anime-faces")
-    m = load_masks()[..., EYE_CHANNEL].astype(np.float32).mean(0) / 255.0
+    if image_size == 64:
+        arr = preprocess_all("./data/anime-faces")
+        masks_all = load_masks()
+    else:
+        arr = np.load(f"./.preprocessed/anime_faces_{image_size}_anime6b.npy")
+        arr = arr.astype(np.float32) / 127.5 - 1.0
+        masks_all = load_masks(f"./.preprocessed/anime_faces_masks_{image_size}.npy")
+    m = masks_all[..., EYE_CHANNEL].astype(np.float32).mean(0) / 255.0
     left, right = m.copy(), m.copy()
     left[:, m.shape[1] // 2 :] = 0
     right[:, : m.shape[1] // 2] = 0
@@ -72,7 +87,7 @@ def main(arms: list[str], n: int = 256, seed: int = 0, n_steps: int = 16):
     thresh = float(np.quantile(d_real, 0.95))
     rows = [("real", d_real), ("real (2nd half)", d_real2)]
 
-    noise = jax.random.normal(jax.random.key(seed), (n, 64, 64, 3))
+    noise = jax.random.normal(jax.random.key(seed), (n, image_size, image_size, 3))
     for arm in arms:
         name, path = arm.split("=", 1)
         model = ImageFM.load(path, UNet.from_hparams)
@@ -80,10 +95,22 @@ def main(arms: list[str], n: int = 256, seed: int = 0, n_steps: int = 16):
         masks = None
         if model.cond_channels:
             masks = jnp.asarray(
-                LayoutPrior.load().sample_masks(n, seed)[..., : model.cond_channels]
+                LayoutPrior.load().sample_masks(n, seed, size=image_size)[
+                    ..., : model.cond_channels
+                ]
             )
-        gen = np.clip(np.asarray(model.generate(noise, masks)), -1, 1)
-        rows.append((name, eye_distance(gen, left, right)))
+        gen = np.concatenate(
+            [
+                np.asarray(
+                    model.generate(
+                        noise[i : i + batch],
+                        None if masks is None else masks[i : i + batch],
+                    )
+                )
+                for i in range(0, n, batch)
+            ]
+        )
+        rows.append((name, eye_distance(np.clip(gen, -1, 1), left, right)))
 
     print(f"threshold (real p95) = {thresh:.4f}\n")
     print(f"{'':>20}{'mean dist':>11}{'median':>9}{'hetero %':>10}")

@@ -1,5 +1,6 @@
 """Main entry point for the tinyflow CLI."""
 
+from pathlib import Path
 from typing import Annotated
 
 import jax
@@ -16,7 +17,7 @@ from data.animefaces import (
     load_masks,
     preprocess_all,
 )
-from data.layouts import LayoutPrior
+from data.layouts import LayoutPrior, rasterize
 from metrics import compute_real_stats
 from models import ToyFM
 from models.imagefm import ImageFM, TrainConfig
@@ -85,8 +86,10 @@ def anime(
     curation in ``celebamask_keep.npy`` instead of ``--min-landmark-score``,
     and the held-out real label maps as the evaluation layout bank (no
     layout prior).  ``--mask-path`` defaults per dataset.  ``--image-size 128``
-    (CelebA only) uses the ``_128`` arrays ``data/celebamask.py --size 128``
-    writes; the U-Net places its region-pooling layers by resolution.
+    uses the ``_128`` arrays: for CelebA those ``data/celebamask.py --size 128``
+    writes, for anime the Real-ESRGAN-upscaled sources from
+    ``experiments/upscale_anime.py build`` with masks rasterised from the
+    landmarks; the U-Net places its region-pooling layers by resolution.
 
     ``--cond-channels 3`` conditions the model on the cached layout masks at
     ``--mask-path`` (face, eyes, mouth); ``--region-pool 1`` adds the
@@ -111,8 +114,8 @@ def anime(
     if dataset_name not in ("anime", "celeba"):
         raise ValueError(f"unknown --dataset-name {dataset_name!r}")
     celeba = dataset_name == "celeba"
-    if not celeba and image_size != 64:
-        raise ValueError("--image-size is only supported for --dataset-name celeba")
+    if image_size not in (64, 128):
+        raise ValueError("--image-size must be 64 or 128")
     sfx = "" if image_size == 64 else f"_{image_size}"
     if celeba:
         arr = np.load(f"./.preprocessed/celebamask_faces{sfx}.npy")
@@ -122,10 +125,28 @@ def anime(
             cache_path=f"./.preprocessed/celebamask_stats{sfx}.npz",
         )
         mask_path = mask_path or f"./.preprocessed/celebamask_masks{sfx}.npy"
-    else:
+    elif image_size == 64:
         arr = preprocess_all("./data/anime-faces")
         real_stats = compute_real_stats(arr, batch_size=batch_size)
         mask_path = mask_path or "./.preprocessed/anime_faces_masks.npy"
+    else:
+        # 128 px anime: the 64 px sources upscaled by Real-ESRGAN anime-6B
+        # (``experiments/upscale_anime.py build``); FID is therefore measured
+        # against the upscaler's rendering of the data.  Masks are rasterised
+        # from the stored landmarks at this size (``layouts.rasterize``
+        # reproduces the 64 px training masks to within 0.2 % of pixels).
+        arr = np.load("./.preprocessed/anime_faces_128_anime6b.npy")
+        arr = arr.astype(np.float32) / 127.5 - 1.0
+        real_stats = compute_real_stats(
+            arr, batch_size=batch_size, cache_path="./.preprocessed/anime_stats_128.npz"
+        )
+        mask_path = mask_path or "./.preprocessed/anime_faces_masks_128.npy"
+        if not Path(mask_path).exists():
+            lm = np.load("./.preprocessed/anime_faces_landmarks.npy")
+            np.save(
+                mask_path,
+                (rasterize(lm, size=image_size) * 255).round().astype(np.uint8),
+            )
 
     masks = load_masks(mask_path)[..., :cond_channels] if cond_channels > 0 else None
     if masks is not None and masks.shape[-1] < cond_channels:
@@ -152,7 +173,7 @@ def anime(
         idx = np.random.default_rng(seed).choice(len(bank), 5000)
         eval_masks = bank[idx, ..., :cond_channels].astype(np.float32) / 255.0
     elif cond_channels > 0:
-        eval_masks = LayoutPrior.load().sample_masks(5000, seed=seed)[
+        eval_masks = LayoutPrior.load().sample_masks(5000, seed=seed, size=image_size)[
             ..., :cond_channels
         ]
 

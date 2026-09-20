@@ -715,3 +715,38 @@ but the run was stopped by decision: the 64 px result already shows the recipe a
 autoguidance transfer, and a 128 px model is a different cost class (≈10× per epoch)
 for a question — iris agreement on real faces — that the 64 px anime result
 already answers.
+
+---
+
+## 11. 128 px — tried, not pursued (2026-09-20)
+
+**Upscaling the anime sources.**  The dataset is native 64×64, so a 128 px model
+needs super-resolved targets.  `experiments/upscale_anime.py` (standalone RRDBNet,
+runs in the detector env) compared Lanczos, Real-ESRGAN anime-6B, Real-ESRGAN
+x4plus and APISR-RRDB on training images at ×4 then area-mean to 128
+(`runs/upscale/dataset_preview.png`, `_zoom.png`): **anime-6B and x4plus are clean
+and faithful** (sharper line-art, iris highlights and hair strands preserved, no
+hallucinated texture, colours unchanged); APISR over-darkens outlines and shifts
+contrast; Lanczos blurs.  The opposite verdict from §7.4 on *generated* samples,
+for the same reason: clean sources are on-distribution for these networks,
+generated samples are not.  `build --model=anime6b` writes
+`.preprocessed/anime_faces_128_anime6b.npy` (kept, 1 GB).
+
+**Plumbing** (`main.py --image-size 128`, committed): training masks are
+`layouts.rasterize(landmarks, 128)` — verified to reproduce the stored 64 px masks
+to within 0.2 % of pixels — and the prior bank is rasterised at 128
+(`LayoutPrior.sample_masks(size=)`); Inception stats cached at
+`anime_stats_128.npz`; `eye_consistency.py --image-size 128` scores at this size.
+Note: the nose disc in `rasterize` has a pixel-unit radius, so channel 3 shrinks
+4× at 128 — irrelevant for `cond_channels 3`, fix before using the nose at 128.
+FID at 128 would be against the *upscaler's rendering* of the data and must be
+labelled as such; iris mismatch and paired samples are the honest metrics.
+
+**Screen pair, RP on/off, 40 epochs, batch 128** (`runs/chain_anime128_bs128_oom.log`):
+both arms OOM on the 24 GB card — the compiled train step needs 16.05 GiB and the
+per-epoch checkpoint / sample-PNG churn pushes the allocator over it even at
+`XLA_PYTHON_CLIENT_MEM_FRACTION=0.95` (the RP arm at step 0, the no-RP arm at
+epoch 4 after 166 s/epoch, loss 0.075).  Batch 64 fits but at ≈3+ min/epoch is
+a different cost class; **dropped by decision** along with CelebA-128 (§10, whose
+arrays were deleted the same day; regenerable with `data/celebamask.py --size 128`).
+
