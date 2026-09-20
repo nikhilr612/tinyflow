@@ -126,6 +126,19 @@ wins), and the inference code should be the exported model (ONNX / numpy), not
 the training stack.  Simplicity is the criterion: one `app.py`, the weights,
 the prior, a short README.
 
+## ACCEPTANCE TEST PASSED (2026-09-21 04:52)
+
+The rewrite (`rewrite/winner`, worktree `../tinyflow-clean`, uncommitted — the
+user commits there) trained with `uv run main.py anime` (seed 49, 125 epochs,
+flips only) and evaluated with this branch's harness via
+`experiments/checkpoints.load_any`: loss 0.0767 vs 0.0768, FID 29.0 / 29.1 vs
+28.8 / 28.3 (prior / real), iris 3.5 % vs 3.5 %.  Results: `runs/repro/`.
+`just distil` on that checkpoint (100 k pairs, 40 epochs, ~95 min, final loss
+0.0034) then `cond_eval.py --n-jumps 2`: 2-jump FID 39.0 / 38.7, iris
+4.3 / 5.1 % — vs 37.8 for `runs/distill_rp`, i.e. within seed noise
+(`../tinyflow-clean/runs/distil{,_eval.log}`).  Next on the clean branch: the
+user's review, root README, the user's one-click reproduction recipe.
+
 ## Priorities (2026-09-20 evening): (1) the instability diagnosis (§1c), then
 (3) the winner call and the minimal rewrite (§1b).  Deferred: improving the
 distilled map further, and touching the Space again (only if the rewrite's

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import sys
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -38,10 +39,9 @@ import typer  # noqa: E402
 
 from data.animefaces import load_masks, preprocess_all  # noqa: E402
 from data.layouts import LayoutPrior  # noqa: E402
+from experiments.checkpoints import CleanFM, load_any  # noqa: E402
 from experiments.eye_consistency import eye_distance  # noqa: E402
 from metrics import compute_real_stats, evaluate_fid  # noqa: E402
-from models.imagefm import ImageFM  # noqa: E402
-from models.unet import UNet  # noqa: E402
 
 EYE_CHANNEL = 1  # mask channels: 0 face, 1 eyes, 2 mouth
 
@@ -49,15 +49,15 @@ EYE_CHANNEL = 1  # mask channels: 0 face, 1 eyes, 2 mouth
 class MaskedSampler:
     """``generate(noise)`` that pairs every batch with masks from a source."""
 
-    def __init__(self, model: ImageFM, mask_fn):
-        """``mask_fn(n, key) -> (n, H, W, K)`` masks in [0, 1], or ``None``."""
-        self.model, self.mask_fn = model, mask_fn
+    def __init__(self, generate_fn, mask_fn):
+        """``generate_fn(x_0, masks)`` and ``mask_fn(n, key) -> (n, H, W, K)`` masks."""
+        self.generate_fn, self.mask_fn = generate_fn, mask_fn
         self._key = jax.random.key(0)
 
     def generate(self, x_0):
         """Sample ``len(x_0)`` images with freshly drawn masks."""
         self._key, sk = jax.random.split(self._key)
-        return self.model.generate(x_0, self.mask_fn(len(x_0), sk))
+        return self.generate_fn(x_0, self.mask_fn(len(x_0), sk))
 
 
 def main(
@@ -68,11 +68,14 @@ def main(
     seed: int = 0,
     n_steps: int = 16,
     dataset: str = "anime",
+    n_jumps: int = 0,
 ):
     """Print FID and eye-consistency per mode; write ``<run>/cond_eval.json``.
 
     ``n_steps`` sets the sampler; 16 Dopri5 steps score within 0.5 FID of 64
     on this data (``experiments/bottleneck.py``) at a quarter of the cost.
+    ``n_jumps > 0`` samples with a clean-branch checkpoint's distilled flow map
+    instead of the ODE solver.
     ``--dataset celeba`` evaluates against ``celebamask_faces.npy`` with the
     held-out ``celebamask_eval_masks.npy`` bank as the ``real`` masks (there
     is no layout prior, so ``prior`` is unavailable).
@@ -87,8 +90,13 @@ def main(
     else:
         arr = preprocess_all("./data/anime-faces")
         real_stats = compute_real_stats(arr)
-    model = ImageFM.load(checkpoint, UNet.from_hparams)
+    model = load_any(checkpoint)
     model.n_steps = n_steps
+    generate_fn = model.generate
+    if n_jumps:
+        if not isinstance(model, CleanFM):
+            raise SystemExit("--n-jumps needs a checkpoint with a distilled flow map")
+        generate_fn = partial(model.jump, n_jumps=n_jumps)
     h = int(model.hparams.get("image_size", 64))
     k = model.cond_channels
     if k == 0:
@@ -107,9 +115,7 @@ def main(
 
     def real_masks(n, key):
         idx = np.asarray(
-            jax.random.choice(
-                key, len(masks_real), (n,), replace=len(masks_real) < n
-            )
+            jax.random.choice(key, len(masks_real), (n,), replace=len(masks_real) < n)
         )
         return jnp.asarray(masks_real[idx, ..., :k].astype(np.float32) / 255.0)
 
@@ -132,7 +138,7 @@ def main(
         if mode == "prior" and dataset == "celeba":
             raise SystemExit("--dataset celeba has no layout prior; use --modes real")
         src = sources[mode]
-        sampler = model if src is None else MaskedSampler(model, src)
+        sampler = model if src is None else MaskedSampler(generate_fn, src)
         fid = evaluate_fid(sampler, real_stats, jax.random.key(seed + 1), n_fid)
         gen = np.clip(np.asarray(sampler.generate(noise)), -1, 1)
         d = eye_distance(gen, left, right)

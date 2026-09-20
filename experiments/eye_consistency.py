@@ -33,8 +33,7 @@ import typer  # noqa: E402
 
 from data.animefaces import load_masks, preprocess_all  # noqa: E402
 from data.layouts import LayoutPrior  # noqa: E402
-from models.imagefm import ImageFM  # noqa: E402
-from models.unet import UNet  # noqa: E402
+from experiments.checkpoints import load_any  # noqa: E402
 
 EYE_CHANNEL = 1  # mask channels: 0 face, 1 eyes, 2 mouth
 
@@ -90,7 +89,7 @@ def main(
     noise = jax.random.normal(jax.random.key(seed), (n, image_size, image_size, 3))
     for arm in arms:
         name, path = arm.split("=", 1)
-        model = ImageFM.load(path, UNet.from_hparams)
+        model = load_any(path)
         model.n_steps = n_steps
         masks = None
         if model.cond_channels:
