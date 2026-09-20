@@ -261,6 +261,54 @@ class ImageFM:
         )[:, 0]
 
     @jaxtyped(typechecker=beartype.beartype)
+    def generate_map(
+        self,
+        x_0: Float[Array, " B H W C"],
+        masks: Float[Array, " B H W K"] | None = None,
+        n_steps: int = 1,
+    ) -> Float[Array, " B H W C"]:
+        """Sample with the learned flow map in ``n_steps`` jumps (no ODE solver).
+
+        Requires a network trained with ``flow_map_frac > 0``: each jump
+        ``x_s = x_t + (s - t) u(x_t, t, s)`` uses the *average* velocity over
+        ``[t, s]``, so ``n_steps = 1`` is one network evaluation from noise to
+        image.  On a plain velocity model this degrades to Euler.
+        """
+        cond = self._cond(x_0, masks)
+        x = x_0
+        for k in range(n_steps):
+            t, s = k / n_steps, (k + 1) / n_steps
+            if cond is None:
+                u = jax.vmap(
+                    lambda xi: ImageFM.mean_velocity(
+                        self.net_theta, xi, t, s, self.denom_floor
+                    )
+                )(x)
+            else:
+                u = jax.vmap(
+                    lambda xi, ci: ImageFM.mean_velocity(
+                        self.net_theta, xi, t, s, self.denom_floor, ci
+                    )
+                )(x, cond)
+            x = x + (s - t) * u
+        return x
+
+    @staticmethod
+    def mean_velocity(net_theta: Any, x, t, s, denom_floor: float, cond=None):
+        """Average velocity over ``[t, s]``, ``u = (x_hat(x, t, s) - x) / (1 - t)``.
+
+        The network's two-time output is read as the endpoint the average
+        velocity would reach at ``t = 1``, so ``u`` is derived exactly as
+        ``velocity`` derives ``v`` and the two coincide on the diagonal
+        ``s = t``.  One jump is then ``x + (s - t) u``; for ``t = 0, s = 1`` it
+        is the network output itself.
+        """
+        t = jax.numpy.array(t)
+        s = jax.numpy.array(s)
+        x_in = x if cond is None else jax.numpy.concatenate([x, cond], axis=-1)
+        return (net_theta(x_in, t, s) - x) / jax.numpy.maximum(1 - t, denom_floor)
+
+    @jaxtyped(typechecker=beartype.beartype)
     @staticmethod
     def train_step(
         net_theta: Any,
@@ -340,6 +388,178 @@ class ImageFM:
         u = (x_hat - x_t) / jax.numpy.maximum(1 - t_b, denom_floor)
         return optax.l2_loss(u, x_1 - x_0).mean()
 
+    @jaxtyped(typechecker=beartype.beartype)
+    @staticmethod
+    def train_step_meanflow(
+        net_theta: Any,
+        target_theta: Any,
+        t: Float[Array, " B"],
+        s: Float[Array, " B"],
+        x_0: Float[Array, " B H W C"],
+        x_1: Float[Array, " B H W C"],
+        denom_floor: float = 0.05,
+        masks: Float[Array, " B H W K"] | None = None,
+        cond_channels: int = 0,
+        weight_c: float = 1e-3,
+        weight_p: float = 1.0,
+    ) -> Float[Array, ""]:
+        """MeanFlow step: regress the average velocity over ``[t, s]``.
+
+        With ``u(x_t, t, s) = (1 / (s - t)) * int_t^s v(x_tau, tau) dtau`` the
+        average velocity of the flow, differentiating ``(s - t) u`` along the
+        trajectory in ``t`` (``s`` fixed) gives the MeanFlow identity (Geng et
+        al. 2025, in this module's noise-at-0 convention)
+
+            u = v(x_t, t) + (s - t) * du/dt,    du/dt = d_t u + v . grad_x u,
+
+        a local condition on ``u`` that needs no integration.  The target is
+        formed with the *conditional* velocity ``v_c = x_1 - x_0`` in both
+        places; it is linear in ``v_c``, so its conditional expectation given
+        ``x_t`` is the true target and the minimiser is the marginal average
+        velocity -- the same argument that makes plain flow matching valid.
+        ``du/dt`` is one ``jax.jvp`` along the tangent ``(v_c, 1)``, taken
+        through ``target_theta`` -- the EMA weights -- rather than the weights
+        being trained: the target then moves on the EMA's time scale and the
+        trainee regresses toward a fixed point instead of chasing its own
+        derivative (with the trainee's derivative in the target, a fine-tune
+        from a velocity model diverged within two epochs at the hand-placed
+        endpoints, where that derivative is ~10x the signal).  On the
+        diagonal ``s = t`` the target is ``v_c`` and this is exactly
+        ``train_step``.
+
+        Per-sample errors are re-weighted by ``1 / (|err|^2 + weight_c)^p``,
+        normalised to mean 1 over the batch (MeanFlow's adaptive weighting,
+        kept scale-neutral so a fine-tune keeps its learning rate): the
+        derivative target is noisy early on and the weighting stops a few
+        samples from owning the step.  ``p = 1`` (MeanFlow's) bounds every
+        sample's contribution at ``1 / Z``: the target contains the network's
+        own derivative, so an unbounded loss feeds back -- with ``p = 1/2``
+        the fine-tune diverged in one epoch from the ``t = 0, s = 1`` pairs,
+        whose target is ~10x the size of ``u`` on the pretrained model
+        (``d_t u`` is ~9 at ``t = 0``, outside the logit-normal support).
+
+        Args:
+            net_theta: A two-time network ``__call__(x, t, s)``.
+            target_theta: Same architecture; supplies ``du/dt`` (no gradient).
+            t: Start times ``(B,)``.
+            s: Target times ``(B,)``, ``s >= t``.
+            x_0: Noise ``(B, H, W, C)``.
+            x_1: Data ``(B, H, W, C)``.
+            denom_floor: See ``train_step``.
+            masks: Layout masks; see ``train_step``.
+            cond_channels: See ``train_step``.
+            weight_c: Constant in the adaptive weight.
+            weight_p: Exponent of the adaptive weight.
+
+        Returns:
+            Scalar loss.
+        """
+        if masks is None and cond_channels:
+            raise ValueError("cond_channels > 0 needs masks")
+        t_b = rearrange(t, "b -> b 1 1 1")
+        x_t = t_b * x_1 + (1 - t_b) * x_0
+        v_c = x_1 - x_0
+
+        def u_and_du(x, ti, si, vi, ci):
+            u = ImageFM.mean_velocity(net_theta, x, ti, si, denom_floor, ci)
+
+            def u_target(xx, tt):
+                return ImageFM.mean_velocity(target_theta, xx, tt, si, denom_floor, ci)
+
+            _, du = jax.jvp(u_target, (x, ti), (vi, jax.numpy.ones_like(ti)))
+            return u, du
+
+        if cond_channels and masks is not None:
+            cond = cond_token(
+                masks[..., :cond_channels], masks.shape[:3] + (cond_channels,)
+            )
+            u, du_dt = jax.vmap(u_and_du)(x_t, t, s, v_c, cond)
+        else:
+            u, du_dt = jax.vmap(lambda x, ti, si, vi: u_and_du(x, ti, si, vi, None))(
+                x_t, t, s, v_c
+            )
+        s_b = rearrange(s, "b -> b 1 1 1")
+        target = jax.lax.stop_gradient(v_c + (s_b - t_b) * du_dt)
+        err = jax.numpy.mean((u - target) ** 2, axis=(1, 2, 3))  # (B,)
+        w = jax.lax.stop_gradient((err + weight_c) ** -weight_p)
+        w = w / w.mean()
+        return 0.5 * jax.numpy.mean(w * err)
+
+    @jaxtyped(typechecker=beartype.beartype)
+    @staticmethod
+    def train_step_shortcut(
+        net_theta: Any,
+        target_theta: Any,
+        t: Float[Array, " B"],
+        s: Float[Array, " B"],
+        x_0: Float[Array, " B H W C"],
+        x_1: Float[Array, " B H W C"],
+        denom_floor: float = 0.05,
+        masks: Float[Array, " B H W K"] | None = None,
+        cond_channels: int = 0,
+    ) -> Float[Array, ""]:
+        """Shortcut step: one jump over ``[t, s]`` must equal two half jumps.
+
+        The average velocity composes exactly at the midpoint ``m = (t+s)/2``,
+
+            u(x_t, t, s) = 1/2 [u(x_t, t, m) + u(x_m, m, s)],
+            x_m = x_t + (m - t) u(x_t, t, m),
+
+        (Frans et al. 2025, the self-consistency of shortcut models; the
+        Lagrangian semigroup form of flow-map matching, Boffi et al. 2024).
+        The right-hand side is evaluated with ``target_theta`` (the EMA
+        weights) under stop-gradient and regressed with the plain L2, so the
+        target is bounded by what the network already outputs.  This is the
+        derivative-free alternative to ``train_step_meanflow``, whose target
+        contains ``du/dt`` and, fine-tuned from a velocity model with a sharp
+        ``t`` dependence, amplified high-frequency error in ``t`` until it
+        diverged (three attempts, `runs/mf_rp_100_diverged_*`).  Half spans
+        are supervised by the same rule, and the recursion bottoms out on the
+        diagonal ``s = t``, which ``train_step`` anchors to the data.
+
+        Args:
+            net_theta: A two-time network ``__call__(x, t, s)``.
+            target_theta: Same architecture; supplies the two half jumps.
+            t: Start times ``(B,)``.
+            s: Target times ``(B,)``, ``s >= t``.
+            x_0: Noise ``(B, H, W, C)``.
+            x_1: Data ``(B, H, W, C)``.
+            denom_floor: See ``train_step``.
+            masks: Layout masks; see ``train_step``.
+            cond_channels: See ``train_step``.
+
+        Returns:
+            Scalar loss.
+        """
+        if masks is None and cond_channels:
+            raise ValueError("cond_channels > 0 needs masks")
+        t_b = rearrange(t, "b -> b 1 1 1")
+        x_t = t_b * x_1 + (1 - t_b) * x_0
+        m = 0.5 * (t + s)
+        m_b = rearrange(m, "b -> b 1 1 1")
+
+        def u_fn(theta, x, ti, si, ci):
+            return ImageFM.mean_velocity(theta, x, ti, si, denom_floor, ci)
+
+        cond = None
+        if cond_channels and masks is not None:
+            cond = cond_token(
+                masks[..., :cond_channels], masks.shape[:3] + (cond_channels,)
+            )
+        in_axes = (0, 0, 0, None if cond is None else 0)
+        u = jax.vmap(lambda x, ti, si, ci: u_fn(net_theta, x, ti, si, ci), in_axes)(
+            x_t, t, s, cond
+        )
+        u_first = jax.vmap(
+            lambda x, ti, mi, ci: u_fn(target_theta, x, ti, mi, ci), in_axes
+        )(x_t, t, m, cond)
+        x_m = x_t + (m_b - t_b) * u_first
+        u_second = jax.vmap(
+            lambda x, mi, si, ci: u_fn(target_theta, x, mi, si, ci), in_axes
+        )(x_m, m, s, cond)
+        target = jax.lax.stop_gradient(0.5 * (u_first + u_second))
+        return optax.l2_loss(u, target).mean()
+
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -364,6 +584,17 @@ class TrainConfig:
         cond_channels: Number of mask channels the network is conditioned on
             (``0`` = unconditioned); see ``train_step``.
         cond_dropout: Null-token probability for classifier-free conditioning.
+        flow_map_frac: Fraction of each batch trained with
+            ``train_step_meanflow`` on off-diagonal ``(t, s)`` pairs (the
+            endpoints ``t = 0`` and ``s = 1`` each placed exactly with
+            probability 1/2 after a ramp, see ``train_on_image``); the rest is
+            the plain flow-matching step.  ``0`` disables it; needs a network
+            built with ``flow_map=1``.
+        flow_map_ramp: Steps over which the endpoint probability ramps from
+            0 to 1/2.
+        flow_map_loss: ``"shortcut"`` (two half jumps, derivative-free; the
+            default) or ``"meanflow"`` (the average-velocity identity with a
+            ``jvp``; diverged when fine-tuned from a velocity model).
         ema_decay: Decay of the exponential moving average of the weights that
             is published as ``model.net_theta`` (checkpointed, sampled and
             evaluated) while the optimiser keeps stepping the raw weights.
@@ -388,6 +619,9 @@ class TrainConfig:
     t_mu: float = -0.8
     t_sigma: float = 1.0
     ema_decay: float = 0.999
+    flow_map_frac: float = 0.0
+    flow_map_ramp: int = 1500
+    flow_map_loss: str = "shortcut"
 
 
 def train_on_image(
@@ -469,17 +703,56 @@ def train_on_image(
             cfg.t_mu + cfg.t_sigma * jax.random.normal(sk1, (batch_size,))
         )
         rand_input = jax.random.normal(sk2, shape=batch.shape)
-        loss, grad = eqx.filter_value_and_grad(ImageFM.train_step)(
-            net_theta,
-            t,
-            rand_input,
-            batch,
-            model.denom_floor,
-            masks,
-            cfg.cond_channels,
-            cfg.cond_dropout,
-            sk3,
-        )
+        n_map = int(round(cfg.flow_map_frac * batch_size))
+        # Exact endpoints are placed with a probability that ramps from 0 to
+        # 1/2 over the first cfg.flow_map_ramp steps: long spans arrive once
+        # the map is consistent on short ones.
+        p_end = 0.5 * jax.numpy.minimum(1.0, step / max(cfg.flow_map_ramp, 1))
+
+        def loss_fn(net_theta):
+            fm = ImageFM.train_step(
+                net_theta,
+                t[n_map:],
+                rand_input[n_map:],
+                batch[n_map:],
+                model.denom_floor,
+                None if masks is None else masks[n_map:],
+                cfg.cond_channels,
+                cfg.cond_dropout,
+                sk3,
+            )
+            if n_map == 0:
+                return fm
+            # Off-diagonal pairs.  Two logit-normal draws almost never span the
+            # jumps the map is sampled with (P(t < 0.05, s > 0.95) ~ 4e-6), so
+            # the endpoints are placed by hand: with probability p_end a pair
+            # starts at t = 0 exactly, with p_end it ends at s = 1 exactly
+            # (independently); otherwise t is the flow-matching draw and s is
+            # uniform on (t, 1].
+            k1, k2, k3 = jax.random.split(sk3, 3)
+            t_lo = jax.numpy.where(
+                jax.random.bernoulli(k1, p_end, (n_map,)), 0.0, t[:n_map]
+            )
+            s_hi = t_lo + (1 - t_lo) * jax.random.uniform(k2, (n_map,))
+            s_hi = jax.numpy.where(jax.random.bernoulli(k3, p_end, (n_map,)), 1.0, s_hi)
+            step_fn = {
+                "shortcut": ImageFM.train_step_shortcut,
+                "meanflow": ImageFM.train_step_meanflow,
+            }[cfg.flow_map_loss]
+            mf = step_fn(
+                net_theta,
+                ema_theta,
+                t_lo,
+                s_hi,
+                rand_input[:n_map],
+                batch[:n_map],
+                model.denom_floor,
+                None if masks is None else masks[:n_map],
+                cfg.cond_channels,
+            )
+            return (n_map * mf + (batch_size - n_map) * fm) / batch_size
+
+        loss, grad = eqx.filter_value_and_grad(loss_fn)(net_theta)
         updates, optimizer_state = optimizer.update(grad, optimizer_state)
         net_theta = eqx.apply_updates(net_theta, updates)
         if cfg.ema_decay > 0:

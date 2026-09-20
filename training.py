@@ -74,6 +74,24 @@ class MaskedSampler:
         return self.model.generate(x_0, self.masks[idx])
 
 
+class MapSampler:
+    """``generate(noise)`` through ``ImageFM.generate_map`` (flow-map jumps)."""
+
+    def __init__(self, model: ImageFM, masks: np.ndarray | None, n_steps: int):
+        """``masks``: bank as in ``MaskedSampler`` or ``None``; ``n_steps`` jumps."""
+        self.model, self.n_steps, self._pos = model, n_steps, 0
+        self.masks = None if masks is None else jnp.asarray(masks)
+
+    def generate(self, x_0):
+        """Sample ``len(x_0)`` images in ``n_steps`` jumps."""
+        m = None
+        if self.masks is not None:
+            idx = (self._pos + jnp.arange(len(x_0))) % len(self.masks)
+            self._pos = (self._pos + len(x_0)) % len(self.masks)
+            m = self.masks[idx]
+        return self.model.generate_map(x_0, m, self.n_steps)
+
+
 def save_sample(sampler, outdir: Path, noise: jax.Array, epoch: int) -> None:
     """Save a sample from fixed noise, both as the latest and as a per-epoch file.
 
@@ -139,6 +157,11 @@ def run(
         record: dict = {"epoch": epoch, "loss": loss}
         history.append(record)
         pbar.set_postfix({"loss": f"{loss:.4f}"})
+        if not np.isfinite(loss):
+            print(f"\nEpoch {epoch}: loss is {loss}; stopping.", flush=True)
+            with (outdir / "losses.json").open("w") as f:
+                json.dump(history, f, indent=2)
+            break
 
         model.save(run_cfg.outpath)
         save_sample(png_sampler, outdir, sample_noise, epoch)
@@ -162,6 +185,20 @@ def run(
             print(f"\nEpoch {epoch}: FID = {fid:.2f}", flush=True)
             record["fid"] = round(fid, 2)
             record["fid_n_samples"] = run_cfg.fid_n_samples
+            if train_cfg.flow_map_frac > 0:
+                # The flow map's own samplers: one and two jumps (1 / 2 NFE).
+                for n_jumps in (1, 2):
+                    jump = MapSampler(model, eval_masks, n_jumps)
+                    f = evaluate_fid(
+                        jump,
+                        real_stats,
+                        eval_key,
+                        n_samples=run_cfg.fid_n_samples,
+                        batch_size=run_cfg.fid_batch_size,
+                        image_size=image_shape[0],
+                    )
+                    print(f"  {n_jumps}-jump FID = {f:.2f}", flush=True)
+                    record[f"fid_map{n_jumps}"] = round(f, 2)
 
             if fid < best_fid * 1.01:
                 if fid < best_fid:

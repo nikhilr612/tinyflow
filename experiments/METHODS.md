@@ -234,6 +234,106 @@ is *slower* per epoch than 128 (39.9 vs 29.0 s): the GPU is saturated at 128.
 Two concurrent jobs need `XLA_PYTHON_CLIENT_MEM_FRACTION=0.47` or the FID stage
 OOMs.
 
+**Sampler cost in network evaluations (NFE)** (`experiments/nfe_sweep.py`,
+2026-09-20, `ctrl_sched/best_model`, 5000 samples, same noise for every arm).
+"16 Dopri5 steps" is 6 evaluations per step ≈ 96 NFE at fixed step size (the
+embedded error estimate is unused).  Explicit fixed-step schemes:
+
+| scheme | steps | NFE | FID |
+|---|---|---|---|
+| Dopri5 (the reported sampler) | 16 | ~96 | 29.3 |
+| Euler | 1 / 2 / 4 / 8 | 1 / 2 / 4 / 8 | 285 / 128 / 58.1 / 36.6 |
+| Euler | 16 / 32 | 16 / 32 | 29.9 / 30.2 |
+| midpoint (RK2) | 1 / 2 | 2 / 4 | 112 / 37.0 |
+| **midpoint** | **4 / 8** | **8 / 16** | **28.1 / 27.1** |
+| midpoint | 16 / 32 | 32 / 64 | 32.7 / 29.9 |
+
+The exact ODE solution is worth ≈29.5–30 (Dopri5-16, Euler-32, midpoint-32
+agree); **midpoint-8 (16 NFE) matches it at a sixth of the cost, midpoint-4
+(8 NFE) at a twelfth.**  Coarse midpoint scores *below* the exact solution
+(27–28) and non-monotonically (midpoint-16: 32.7): the discretisation error of
+a large step along the x̂-derived velocity overshoots toward x̂, a mild
+mode-seeking correction of the same kind as guidance — a property of the
+discretisation, not of the model; report it as such.  One Euler step is the
+blur E[x_1 | x_0] (285), so the flow is genuinely curved below 8 NFE: 1–4 NFE
+needs a learned flow map (shortcut / MeanFlow), and 8 NFE at 28.1 is the
+free baseline such a map must beat.  On the region-pool model
+(`wide_rp_200/best`, `runs/ablation/nfe/rp_midpoint_grid.png`, same noise and
+layouts): faces, layouts and iris pairs are identical row-for-row across
+Dopri5-16 / midpoint-8 / midpoint-4; mean |Δ| per pixel vs Dopri5 0.051 / 0.101
+in [−1, 1] units, visible only as slightly crisper edges.  Dopri5-16 stays the
+reported evaluation sampler (every number above depends on it); midpoint-8 is
+the screening / figure sampler from here.
+
+### 3.4 Flow maps: 1–2 NFE sampling (2026-09-20)
+
+Goal: a sampler cheap enough for a CPU demo (one network evaluation is 2.2 ms
+on the 4090 and 143 ms on a desktop i9 at batch 1; midpoint-8 is 2.3 s on CPU).
+Below 8 NFE the flow is curved (§3.3), so 1–2 NFE needs a learned *flow map*
+``x_s = x_t + (s − t) u(x_t, t, s)`` with ``u`` the average velocity.  Network:
+``UNet(flow_map=1)`` adds the target time ``s`` through a zero-initialised
+projection of the sinusoidal embedding of ``s − t``, so the plain velocity
+checkpoint transplants in unchanged (``main.py --init-from``) and the map is
+read through the same ``(x̂ − x_t)/(1 − t)`` parametrisation: on the diagonal
+``s = t`` it is the velocity model, and ``x̂(x_0, 0, 1)`` is the one-jump
+sample.  All runs fine-tune ``wide_rp_200/best`` (cond + RP), 2e-4 peak,
+half the batch on the plain FM step, half on the map objective.
+
+| objective | target | outcome |
+|---|---|---|
+| MeanFlow (Geng et al. 2025), ``u = v + (s − t) du/dt`` via ``jvp``, pairs from two logit-normal draws | trainee's own derivative | stable but useless: P(t < 0.05, s > 0.95) = 4e-6, the (0 → 1) jump was never supervised (1-jump 130–154, 2-jump 62–66 at ep 30; `mf_rp_100_shortspans`) |
+| same, endpoints placed by hand (t = 0 / s = 1 each w.p. ½), weight exponent ½ | | diverged in one epoch (`_diverged_p05`) |
+| same, exponent 1 (MeanFlow's bounded loss) | | 0.27 → 0.73 → NaN by epoch 2 (`_diverged_p1`) |
+| same, derivative through the EMA weights, endpoint ramp | EMA's derivative | ×3 per epoch, 3087 at epoch 7 (`_diverged_ema`) |
+| **shortcut** (Frans et al. 2025): ``u(t,s) = ½[u(t,m) + u(x_m, m, s)]``, both halves from the EMA | EMA evaluations | stable, 30 s/epoch; saturates: 1-jump 103 / 98 / 92 / 91 / 91, 2-jump 83 / 80 / 77 / 77 / 78 at ep 10–50; the diagonal drifts 32.9 → 37–39 (`sc_rp_100`) |
+| **distillation** (`experiments/distill_map.py`): 100 k teacher trajectories (midpoint-8 on the RP model, prior layouts; ``x_0``, ``x_½``, ``x_1`` cached), plain L2 on the three jumps 0→1, 0→½, ½→1 | fixed teacher | stable, 2 min/epoch; 1-jump 65.5 / 60.5 / 57.6 / 55.7 / 54.4 / 53.4 / **53.0**, 2-jump 40.4 / 39.3 / 38.7 / 38.4 / 38.1 / 37.9 / **37.8** at ep 5–35 (`runs/distill_rp`, stopped at 36 of 40) |
+
+Readings.  (i) Derivative-bootstrapped objectives are the wrong tool for a
+fine-tune from this velocity model: at the hand-placed ``t = 0`` endpoint
+(outside the logit-normal support) the pretrained ``∂_t u`` is ~9 against a
+signal of ~1 (measured: target rms 10.6 vs ``u`` 1.08 at ``t = 0, s = 1``), and
+because the target contains the trainee's own derivative any component of
+``u_θ`` oscillating in ``t`` is amplified by its frequency — the 1000×-scaled
+sinusoidal embedding allows frequencies up to ~1000.  MeanFlow from scratch
+never meets this (a random-init network is smooth and small).  (ii) The
+shortcut target is bounded and trains, but its fixed point is the map's own
+composition, not the ODE solution: composing more jumps reproduces the same
+texture error (1, 2 and 4 jumps are visually identical), and a 50-epoch
+fine-tune saturates ~60 FID above the 8-NFE sampler.  (iii) Distilling a
+*deterministic* teacher is a plain regression with a unique target — no
+bootstrapping, nothing to diverge, and no conditional-mean blur (the teacher
+is a function of (noise, layout)).  It reaches **2 NFE at FID 37.8** and 1 NFE
+at 53, with clean samples (`runs/distill_rp/map_samples.png`: identity, layout
+and colour match the teacher's; the 1-jump row is slightly soft), against the
+teacher's 32.9 at 8–96 NFE.  The distilled model supports *only* its trained
+jumps; its diagonal and quarter-spans are untrained and produce garbage by
+design.  (iv) The curve had flattened by epoch 30 on 100 k pairs; the cheap
+levers are more pairs (9 min per 100 k on the GPU) and a longer horizon, and a
+perceptual term is the obvious lever for the 1-jump softness — but it would be
+a loss on pixels *against a deterministic target*, which §1 does not forbid.
+
+**ONNX export and CPU latency** (`experiments/export_onnx.py`, jax2onnx 0.16 →
+onnxruntime 1.30, CPU provider, one image per call, weights in the sidecar
+`.onnx.data`, 142 MB; output matches JAX to 8e-5).  The U-Net's upsampling
+now passes `antialias=False` (a no-op for upscaling; the converter requires
+it).  Distilled map, i9-14900:
+
+| threads | 1 jump | 2 jumps |
+|---|---|---|
+| 32 (all) | 16 ms | 37 ms |
+| 4 | 27 ms | 55 ms |
+| 2 (a free HF Space) | 51 ms | **99 ms** |
+| 1 | 91 ms | 184 ms |
+
+onnxruntime is ~9× faster than XLA's CPU backend per evaluation (16 vs 143 ms),
+so the earlier CPU estimates were pessimistic by that factor: midpoint-8 on the
+*velocity* model would be ~0.8 s at 2 threads, and the 2-jump map is
+interactive at 0.1 s.
+
+**Sampler decision as it stands**: midpoint-4/8 (8/16 NFE, 28–33 FID) for
+quality; the distilled 2-jump map (2 NFE, 37.8) when latency rules, i.e. the
+CPU demo (≈0.3 s on a desktop CPU).
+
 ---
 
 ## 4. Sampling-time guidance (`experiments/guidance.py`)

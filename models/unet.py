@@ -244,10 +244,13 @@ class UBlock(eqx.Module):
         Then, forward through a res block with concatenated `x_skip`.
         """
         c_in, h, w = x.shape
+        # antialias only acts when downscaling, so False is numerically the
+        # default here; it is what the ONNX converter accepts.
         x_up = jax.image.resize(
             x,
             (c_in, h * 2, w * 2),
             method=jax.image.ResizeMethod.LINEAR,
+            antialias=False,
         )
         x_conv = jax.nn.silu(self.up_conv(x_up))
         concatenated_skip, _packing = pack([x_conv, x_skip], "* h w")
@@ -326,6 +329,7 @@ class UNet(eqx.Module):
     out_conv: eqx.nn.Conv2d
     time_mlp: eqx.nn.Sequential
     region_pools: dict[int, RegionPool]
+    span_proj: eqx.nn.Linear | None
     pool_dilation: int = eqx.field(static=True)
     cond_channels: int = eqx.field(static=True)
     time_embedding_dim: int
@@ -343,6 +347,7 @@ class UNet(eqx.Module):
         region_pool: int = 0,
         time_scale: float = 1000.0,
         image_size: int = 64,
+        flow_map: int = 0,
     ):
         """Initialize a denoising U-Net with multiple blocks conditioned on time.
 
@@ -371,6 +376,13 @@ class UNet(eqx.Module):
                 get ``RegionPool`` layers (the ones producing 16x16 and 32x32).
             time_scale: Multiplier applied to ``t`` before the sinusoidal
                 embedding; see ``sinusoidal_embeddings``.
+            flow_map: ``1`` makes the network a two-time *flow map*
+                ``x_hat(x_t, t, s)``: the endpoint reached by following the
+                average velocity from ``t`` to ``s`` (MeanFlow, Geng et al.
+                2025).  The span ``s - t`` enters through a zero-initialised
+                projection of its sinusoidal embedding added to the time
+                embedding, so at init -- and whenever ``s = t`` -- the network
+                is exactly the plain velocity model.  ``0`` leaves it out.
         """
         n_out = out_channels or in_channels
         if cond_channels and in_channels != n_out + cond_channels + 1:
@@ -389,6 +401,10 @@ class UNet(eqx.Module):
                 eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk2),
             ]
         )
+        self.span_proj = None
+        if flow_map:
+            span = eqx.nn.Linear(time_embedding_dim, time_embedding_dim, key=sk2)
+            self.span_proj = jax.tree.map(jax.numpy.zeros_like, span)
         self.blocks = []
         self.time_scale = time_scale
         for _ in range(n_blocks):
@@ -433,6 +449,7 @@ class UNet(eqx.Module):
             "region_pool",
             "time_scale",
             "image_size",
+            "flow_map",
         }
         return cls(key=key, **{k: v for k, v in hparams.items() if k in known})
 
@@ -453,10 +470,16 @@ class UNet(eqx.Module):
         return jax.numpy.concat([jax.numpy.sin(freqs), jax.numpy.cos(freqs)])
 
     def _forward(
-        self, x: Float[Array, " H W C"], t: Float[Array, ""]
+        self,
+        x: Float[Array, " H W C"],
+        t: Float[Array, ""],
+        s: Float[Array, ""] | None = None,
     ) -> Float[Array, " C H W"]:
         """Run the U-Net; return the channels-first output."""
-        t_embed = self.time_mlp(self.sinusoidal_embeddings(t))
+        t_feat = self.sinusoidal_embeddings(t)
+        if self.span_proj is not None and s is not None:
+            t_feat = t_feat + self.span_proj(self.sinusoidal_embeddings(s - t))
+        t_embed = self.time_mlp(t_feat)
         x_c = rearrange(x, "h w c -> c h w")
         x_in = self.in_conv(x_c)
         skip_values: list[Array] = []
@@ -492,18 +515,23 @@ class UNet(eqx.Module):
 
     @jaxtyped(typechecker=beartype)
     def __call__(
-        self, x: Float[Array, " H W C_in"], t: Float[Array, ""]
+        self,
+        x: Float[Array, " H W C_in"],
+        t: Float[Array, ""],
+        s: Float[Array, ""] | None = None,
     ) -> Float[Array, " H W C_out"]:
         """Forward an image to denoise through the U-net.
 
         Denoise an image `x`, at timestep `t`.  ``C_in`` and ``C_out`` agree
         for an unconditioned model; a conditioned one takes extra layout
         channels in (``C_in = C_out + cond_channels + 1``) and emits the image.
+        For a flow-map network (``flow_map=1``) ``s`` is the target time of
+        the jump; ``None`` (or ``s = t``) is the instantaneous velocity model.
 
         The final bounded activation is omitted.  With the velocity field
         parametrised through the denoised image (Li & He, 2026) the regression
         target is unbounded either way, and a bounded output would add
         vanishing gradients without gaining anything.
         """
-        x_out = self._forward(x, t)
+        x_out = self._forward(x, t, s)
         return rearrange(x_out, "c h w -> h w c")

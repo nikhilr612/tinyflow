@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Annotated
 
+import equinox as eqx
 import jax
 import numpy as np
 import typer
@@ -74,6 +75,8 @@ def anime(
     cond_dropout: float = 0.0,
     region_pool: int = 0,
     mask_path: str = "",
+    flow_map: int = 0,
+    flow_map_frac: float = 0.5,
     fid_batch_size: int = 256,
     fid_n_steps: int = 16,
     dataset_name: str = "anime",
@@ -103,6 +106,12 @@ def anime(
     learning rate warms up linearly and decays with a cosine
     (``--warmup-steps``, ``--lr-end-frac``).  ``--init-from CKPT`` starts
     from a saved model's weights (same architecture) with a fresh optimiser.
+
+    ``--flow-map 1`` builds the two-time (MeanFlow) network and trains
+    ``--flow-map-frac`` of every batch on the average-velocity identity, so
+    the model can also sample in one or two jumps (``ImageFM.generate_map``;
+    their FID is logged beside the ODE sampler's).  ``--init-from`` a velocity
+    checkpoint of the same architecture starts the fine-tune from it.
     """
     assert base_channels % 8 == 0, (
         f"base_channels={base_channels} must be divisible by 8"
@@ -186,6 +195,7 @@ def anime(
         "cond_channels": cond_channels,
         "region_pool": region_pool,
         "image_size": image_size,
+        "flow_map": flow_map,
     }
     key = jax.random.key(seed)
     key, sk1 = jax.random.split(key)
@@ -193,9 +203,31 @@ def anime(
     model = ImageFM(unet, hparams=hparams, n_steps=n_steps)
     if init_from:
         loaded = ImageFM.load(init_from, UNet.from_hparams)
-        if loaded.hparams != hparams:
+        # Older checkpoints lack keys that were added with their default
+        # value later (image_size, flow_map); compare with defaults filled in.
+        defaults = {"image_size": 64, "flow_map": 0}
+        old = {**defaults, **loaded.hparams}
+        if {k: v for k, v in old.items() if k != "flow_map"} != {
+            k: v for k, v in hparams.items() if k != "flow_map"
+        }:
             raise ValueError(f"--init-from architecture {loaded.hparams} != {hparams}")
-        model.net_theta = loaded.net_theta
+        if loaded.hparams.get("flow_map", 0) == flow_map:
+            model.net_theta = loaded.net_theta
+        else:
+            # A velocity checkpoint into a flow-map network: everything but
+            # the (zero-initialised) span projection is transplanted, so the
+            # fine-tune starts as the loaded model on the diagonal s = t.
+            model.net_theta = eqx.tree_at(
+                lambda m: (m.in_conv, m.out_conv, m.time_mlp, m.blocks, m.region_pools),
+                unet,
+                (
+                    loaded.net_theta.in_conv,
+                    loaded.net_theta.out_conv,
+                    loaded.net_theta.time_mlp,
+                    loaded.net_theta.blocks,
+                    loaded.net_theta.region_pools,
+                ),
+            )
         print(f"initialised from {init_from}")
     training.run(
         key,
@@ -210,6 +242,7 @@ def anime(
             ema_decay=ema_decay,
             cond_channels=cond_channels,
             cond_dropout=cond_dropout,
+            flow_map_frac=flow_map_frac if flow_map else 0.0,
         ),
         RunConfig(
             outpath=outpath,
