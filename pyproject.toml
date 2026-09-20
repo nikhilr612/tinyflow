@@ -26,6 +26,10 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["data*", "models*"]
 
+[tool.ruff]
+# The demo Space runs in its own environment (gradio, spaces, onnxruntime).
+extend-exclude = ["experiments/space"]
+
 [tool.ruff.lint]
 extend-select = [
     "N",        # Enforce naming convention
@@ -60,3 +64,6 @@ override-dependencies = ["jax[cuda13]>=0.8.0"]
 dev = [
     "scikit-learn>=1.9.1",
 ]
+
+[tool.ty.src]
+exclude = ["experiments/space"]

@@ -14,8 +14,6 @@ import gradio as gr
 import numpy as np
 import onnxruntime as ort
 import spaces
-from PIL import Image
-
 from layouts import (
     EYE_A,
     EYE_B,
@@ -25,13 +23,15 @@ from layouts import (
     rasterize,
     to_pose_shape,
 )
+from PIL import Image
 
 
 @spaces.GPU
 def _zerogpu_placeholder():
     """Never called.  ZeroGPU refuses to start a Space without a @spaces.GPU
     function; inference here is two CPU evaluations (~0.1 s), for which a GPU
-    attach would only add seconds of overhead."""
+    attach would only add seconds of overhead.
+    """
 
 
 PRIOR = LayoutPrior.load()
