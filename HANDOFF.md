@@ -56,7 +56,9 @@ other unmerged branch (the one held to master's standard).  Not a merge of this
 branch and not pruning in place: fresh minimal modules in the `toyfm` / `imagefm`
 docstring style, none of the conditional paths built during exploration
 (`cond_dropout`, dataset switches, `--image-size`, flow-map flags if the winner
-does not use them, every experiment script).  The `justfile` shrinks to two
+does not use them, every experiment script; the indicator channel of the
+conditioning token exists only for `cond_dropout > 0` and is a constant 1 in the
+recipe — drop it, input = image + 3 mask channels).  The `justfile` shrinks to two
 commands — train the toy model, train the best anime-faces model — plus at most
 one recipe that renders showcase images from the best anime checkpoint.
 Criteria: simplicity, correctness, cleanliness.  The model must run anywhere

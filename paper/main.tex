@@ -25,6 +25,7 @@
 \newcommand{\todo}[1]{\textcolor{red}{[#1]}}
 \newtheorem{proposition}{Proposition}
 \newcommand{\figdir}{../runs/wide_rp_300/figures/}
+\newcommand{\diagram}[2]{\IfFileExists{figures/#1.pdf}{\includegraphics[width=#2]{figures/#1.pdf}}{\fbox{\texttt{figures/#1.pdf}}}}
 \newcommand{\figorplaceholder}[2]{%
   \IfFileExists{\figdir#1}{\includegraphics[width=#2]{\figdir#1}}{\fbox{\parbox{#2}{\centering\vspace{2em}\texttt{#1}\\(produced by \texttt{just paper})\vspace{2em}}}}}
 
@@ -208,6 +209,20 @@ conditioned model the conditioning token is held fixed along the trajectory.
 
 \subsection{Network}\label{sec:unet}
 
+\begin{figure}[t]
+\centering
+\diagram{architecture}{\linewidth}
+\caption{The velocity network. Input: $x_t$ with the three layout-mask channels. Four encoder levels (ResBlock doubling the channels, then a
+$2\times2$ stride-2 depthwise convolution), a bare $4^2\times1024$ tensor with no
+mid block, four decoder levels (bilinear $\uparrow2$ and a $3\times3$ convolution,
+concatenation of the skip, ResBlock halving the channels). Skips run from the
+\emph{input} of each encoder level to the decoder level after its upsample
+(Fig.~\ref{fig:skips}). Region pooling follows the decoder levels producing
+$16^2$ and $32^2$. Time enters every ResBlock through adaLN-Zero; the output is
+$\hat x$ with no activation, and the velocity is derived from it.}
+\label{fig:architecture}
+\end{figure}
+
 The velocity network is a four-level U-Net (\texttt{models/unet.py}), channels-first
 internally, $36.7$\,M parameters at \texttt{base\_channels}$=64$ ($9.38$\,M at $32$).
 \begin{itemize}[leftmargin=1.5em,itemsep=1pt]
@@ -251,6 +266,26 @@ internally, $36.7$\,M parameters at \texttt{base\_channels}$=64$ ($9.38$\,M at $
 
 \subsection{Mask-guided region pooling}\label{sec:regionpool}
 
+\begin{figure}[t]
+\centering
+\diagram{regionpool}{\linewidth}
+\caption{The region-pooling layer. Features are mean-pooled inside each soft region
+(face, eyes, mouth, hair/background), projected by a per-region zero-initialised
+$C\times C$ matrix and broadcast back into that region, as a residual. Both irises
+are painted from the same pooled eye vector.}
+\label{fig:regionpool}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\diagram{skips}{\linewidth}
+\caption{Skip wiring. Standard U-Nets pass each encoder level's output to the
+matching decoder level; this network passes the level's \emph{input} (the previous
+level's output, half the width), i.e. the standard pattern shifted down one level.
+Neutral at $9.4$\,M and the more stable choice at $37$\,M (\S\ref{sec:arch}).}
+\label{fig:skips}
+\end{figure}
+
 Let $h\in\Rb^{C\times H\times W}$ be the decoder feature map after an up block and
 $m_k\in[0,1]^{H\times W}$, $k=1..4$, the layout masks area-averaged to $H\times W$ for
 the regions \emph{face}, \emph{eyes}, \emph{mouth} and \emph{hair/background}
@@ -285,6 +320,20 @@ positive result was re-established on the parallel form before the final run
 (\S\ref{sec:condres}).
 
 \subsection{Layout prior}\label{sec:prior}
+
+\begin{figure}[t]
+\centering
+\diagram{pipeline}{\linewidth}
+\caption{The system. (A) The generator: flow matching with x-prediction on the
+training images and their detected layouts, then distillation of its midpoint-8
+sampler into a one/two-jump flow map. (B) The layout prior, fitted independently
+from the same detected landmarks: a point-distribution model separates pose from
+shape, PCA keeps the 99\% shape subspace, and a Gaussian mixture is fitted over
+pose and PCA coefficients. (C) Inference draws a layout from the prior (optionally
+edited), rasterises it to masks and renders in one or two network evaluations; no
+real image is involved.}
+\label{fig:pipeline}
+\end{figure}
 
 Unconditional generation requires a layout that comes from no real image. The prior
 (\texttt{data/layouts.py}, fitted by \texttt{experiments/landmark\_prior.py}) is a
@@ -835,6 +884,30 @@ reliance on the region-pool broadcast (its contribution to $\xh$ triples over tr
 which renders the prior's imperfect layouts more literally: the prior-vs-real gap is
 $1.5$ FID at the best checkpoint and $3.5$ at the end. Autoguidance
 (\S\ref{sec:autoguide}) more than recovers the deficit: $18.1$ on this checkpoint.
+
+\subsection{Distilled flow map: one or two evaluations}\label{sec:distill}
+
+\begin{figure}[t]
+\centering
+\diagram{distill}{\linewidth}
+\caption{Fixed-teacher distillation. The velocity model under the midpoint
+sampler is a deterministic map from (noise, layout) to an image; the student -- the
+same U-Net with a second time input -- regresses its jumps $0\to1$, $0\to\tfrac12$ and
+$\tfrac12\to1$ onto the teacher's states with a plain L2. Self-consistency
+objectives (MeanFlow, shortcut) either diverged or saturated when fine-tuned from
+this model (\texttt{experiments/METHODS.md} \S3.4).}
+\label{fig:distill}
+\end{figure}
+
+Sixteen Dopri5 steps cost $\approx96$ network evaluations; an explicit midpoint
+scheme with 8 steps (16 evaluations) matches it (FID $27.1$ vs $29.3$ on the plain
+model) and 4 steps (8 evaluations) gives $28.1$, so below 8 evaluations a learned
+\emph{flow map} $x_s = x_t + (s-t)\,u_\theta(x_t,t,s)$ is needed. Distilling the
+midpoint-8 sampler of the region-pool model into such a map (Fig.~\ref{fig:distill};
+100{,}000 teacher trajectories, 35 epochs) gives FID $53.0$ in one evaluation and
+$\mathbf{37.8}$ in two, against the teacher's $32.9$; exported to ONNX the two-jump
+sampler renders an image in $99$\,ms on two CPU threads, which is what the public
+demo runs.
 
 \subsection{Re-noise-and-re-solve refinement}\label{sec:refine}
 
