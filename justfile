@@ -7,6 +7,9 @@ default:
 install:
     uv sync --locked --all-extras --dev
 
+# One-shot: locked env + anime-faces data, ready for `just anime`.
+setup: install data
+
 # Lint + type check (the CI gates).
 check:
     uv run ruff check
