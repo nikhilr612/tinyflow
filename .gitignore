@@ -208,3 +208,9 @@ __marimo__/
 
 # training runs
 runs/
+
+# preprocessed image / mask caches
+.preprocessed/
+
+# datasets
+data/anime-faces
