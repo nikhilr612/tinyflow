@@ -1,4 +1,5 @@
 # tinyflow
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22876650.svg)](https://doi.org/10.5281/zenodo.22876650)
 
 A short and sweet implementation of flow matching models in the JAX ecosystem,
 with an emphasis on readability, simplicity, cleanliness and reproducibility.
