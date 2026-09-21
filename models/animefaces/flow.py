@@ -135,9 +135,9 @@ def _jump(net, x_0, masks, n_jumps: int):
     x = x_0
     for k in range(n_jumps):
         t, s = k / n_jumps, (k + 1) / n_jumps
-        x = x + (s - t) * jax.vmap(lambda xi, mi: mean_velocity(net, xi, mi, t, s))(
-            x, masks
-        )
+        x = x + (s - t) * jax.vmap(
+            lambda xi, mi, t=t, s=s: mean_velocity(net, xi, mi, t, s)
+        )(x, masks)
     return x
 
 

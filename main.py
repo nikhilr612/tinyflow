@@ -10,8 +10,7 @@ import typer
 
 import data.animefaces as faces
 import data.toycardioid
-import models.toyfm as toyfm
-from models import ToyFM
+from models import ToyFM, toyfm
 from models.animefaces.flow import ImageFM, TrainConfig
 from models.animefaces.unet import UNet
 from viz import create_animation
