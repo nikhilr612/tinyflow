@@ -40,13 +40,20 @@ uv add jax[tpu]
 ## Recipes
 
 ```sh
-just toy                                  # 2-D toy model -> runs/toymodel.eqx + an animated SVG
-just anime                                # train the anime-face model -> runs/anime/model.eqx (~1h on one 4090)
-just distil                               # distill it into a 2-evaluation sampler + ONNX -> runs/distil/
-just showcase                             # sample figures from a checkpoint (ODE sampler by default)
-just showcase ./runs/distil/model.eqx 2   # ... or the distilled map, two jumps
-just check                                # ruff + ty, the CI gates
+just toy                                              # 2-D toy model -> runs/toymodel.eqx
+just anime train                                      # train the anime-face model -> runs/anime/ (~1h on one 4090)
+just anime distil                                     # distil it into a 2-evaluation sampler + ONNX -> runs/distil/
+just anime showcase                                   # sample figures from a checkpoint (ODE sampler by default)
+just anime showcase ./runs/distil/model.eqx --n-jumps 2   # ... or the distilled map, two jumps
+just check                                            # ruff + ty, the CI gates
 ```
 
-`uv run main.py --help` (and `--help` on any subcommand) documents the
-hyperparameters directly.
+Each experiment keeps its recipes in its own directory (`models/animefaces/justfile`):
+from there the same recipes run without the prefix (`just train`), and paths stay
+relative to the repo root.  Extra arguments go straight to the command, e.g.
+`just anime train --n-epochs 50`; `uv run main.py anime --help` (and `--help` on
+any subcommand) documents them.
+
+The training loop is shared: `trainer.py` (optimiser, schedule, weight average,
+checkpoints) and `distil.py` (flow-map distillation) are generic, and an
+experiment supplies only its loss and sampler.

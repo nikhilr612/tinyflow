@@ -27,11 +27,6 @@ from data.layouts import LANDMARKS_PATH, rasterize
 CACHE = Path(".preprocessed")
 
 
-def to_uint8(x) -> np.ndarray:
-    """``[-1, 1]`` floats to ``uint8`` pixels, clipped: the model may overshoot."""
-    return np.clip((np.asarray(x) + 1) * 127.5, 0, 255).astype(np.uint8)
-
-
 def load_images(data_dir: str = "./data/anime-faces") -> np.ndarray:
     """The PNGs in ``data_dir/images`` as ``(N, 64, 64, 3)`` in ``[-1, 1]``, cached.
 
