@@ -15,26 +15,21 @@ check:
     uv run ruff check
     uv run ty check
 
-# Fetch the anime-faces images (huggan/anime-faces on the Hub) into data/anime-faces/.
+# Fetch the anime-faces images and landmarks (pinned, from the Hub) into data/anime-faces/.
 data:
-    uv run hf download huggan/anime-faces data.zip --repo-type dataset --local-dir data/anime-faces
-    unzip -q -o data/anime-faces/data.zip -d data/anime-faces
-    mv data/anime-faces/data data/anime-faces/images
+    uv run python -c "from tinyflow.data import animefaces; animefaces.download()"
 
-# The 2-D toy flow model: trains and writes an animated SVG of its samples.
+# The 2-D toy flow model -> runs/toymodel.eqx.
 toy:
-    uv run python data/toycardioid.py
+    uv run python -m tinyflow.data.toycardioid
     uv run main.py toy ./toycardioid.npy ./runs/toymodel.eqx
 
-# The anime-face model: 125 epochs on one 4090 in about an hour -> runs/anime/model.eqx.
-anime *args:
-    uv run main.py anime ./runs/anime {{args}}
+# The recipes live in tinyflow/models/animefaces/justfile, which also runs from that directory.
+# The anime-face experiment: `just anime train|distil|showcase [ARGS]`, bare to list.
+anime *args="--list":
+    @just --justfile tinyflow/models/animefaces/justfile {{args}}
 
-# Distil runs/anime/model.eqx into a 2-evaluation flow map + ONNX -> runs/distil/.
-distil *args:
-    uv run --extra export main.py distil ./runs/anime/model.eqx ./runs/distil {{args}}
-
-# Figures from a checkpoint: `just showcase` (the trained model, ODE sampler) or
-# `just showcase ./runs/distil/model.eqx 2` (the distilled map, two jumps).
-showcase ckpt="./runs/anime/model.eqx" n_jumps="0":
-    uv run main.py showcase {{ckpt}} --n-jumps {{n_jumps}}
+# The recipes live in tinyflow/models/senbridge/justfile, which also runs from that directory.
+# The radar-to-optical experiment: `just senbridge train|evaluate [ARGS]`, bare to list.
+senbridge *args="--list":
+    @just --justfile tinyflow/models/senbridge/justfile {{args}}

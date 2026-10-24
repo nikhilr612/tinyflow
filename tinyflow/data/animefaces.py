@@ -1,8 +1,9 @@
 """The anime-faces training set: images, their layout masks, and a Grain pipeline.
 
-Offline, once: the 64x64 PNGs of ``huggan/anime-faces`` are loaded into one
-array in ``[-1, 1]`` and the layout masks are rasterised from the shipped
-landmarks (``data/landmarks.npz``); both are cached under ``.preprocessed/``.
+Offline, once: the 64x64 PNGs of ``huggan/anime-faces`` and their face
+landmarks (``nikhilr01/anime-faces-landmarks``) are downloaded (``download``),
+the PNGs loaded into one array in ``[-1, 1]`` and the layout masks rasterised
+from the landmarks; both arrays are cached under ``.preprocessed/``.
 Online, per batch, on Grain worker threads: a horizontal flip applied to the
 image and its mask together.  That is the only augmentation: a photometric
 jitter (brightness, contrast, saturation) was measured to cost 3 FID, since the
@@ -15,32 +16,59 @@ Every batch is an ``(images, masks)`` pair, ``(B, 64, 64, 3)`` each, images in
 from __future__ import annotations
 
 import random
+import zipfile
 from pathlib import Path
 
 import grain
 import grain.transforms as gt
 import numpy as np
+from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from data.layouts import LANDMARKS_PATH, rasterize
+from tinyflow.data.layouts import rasterize
 
 CACHE = Path(".preprocessed")
+DATA_DIR = "./data/anime-faces"
+# Pinned revisions of the two Hub datasets: (repository, commit).
+IMAGES = ("huggan/anime-faces", "67ebcf8c69b45feb3883d695f04227078a6c9da9")
+LANDMARKS = (
+    "nikhilr01/anime-faces-landmarks",
+    "c8a4d6c634ab019e65b574b164662f21c76c643d",
+)
 
 
-def to_uint8(x) -> np.ndarray:
-    """``[-1, 1]`` floats to ``uint8`` pixels, clipped: the model may overshoot."""
-    return np.clip((np.asarray(x) + 1) * 127.5, 0, 255).astype(np.uint8)
+def download(data_dir: str = DATA_DIR) -> Path:
+    """Fetch the PNGs to ``data_dir/images`` and their landmarks beside them, once."""
+    root = Path(data_dir)
+    if not (root / "images").exists():
+        repo, revision = IMAGES
+        archive = hf_hub_download(
+            repo, "data.zip", repo_type="dataset", revision=revision
+        )
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(root)
+        (root / "data").rename(root / "images")
+    if not (root / "landmarks.npz").exists():
+        repo, revision = LANDMARKS
+        hf_hub_download(
+            repo,
+            "landmarks.npz",
+            repo_type="dataset",
+            revision=revision,
+            local_dir=root,
+        )
+    return root
 
 
-def load_images(data_dir: str = "./data/anime-faces") -> np.ndarray:
+def load_images(data_dir: str = DATA_DIR) -> np.ndarray:
     """The PNGs in ``data_dir/images`` as ``(N, 64, 64, 3)`` in ``[-1, 1]``, cached.
 
-    Sorted by path, which is the order the shipped landmarks follow.
+    Sorted by path, which is the order the landmarks follow.
     """
     cache = CACHE / "anime_faces.npy"
     if cache.exists():
         return np.load(cache)
-    paths = sorted((Path(data_dir) / "images").glob("*.png"))
+    paths = sorted((download(data_dir) / "images").glob("*.png"))
     arr = np.empty((len(paths), 64, 64, 3), np.float32)
     for i, p in enumerate(paths):
         arr[i] = np.asarray(Image.open(p).convert("RGB"), np.float32) / 127.5 - 1
@@ -49,25 +77,25 @@ def load_images(data_dir: str = "./data/anime-faces") -> np.ndarray:
     return arr
 
 
-def load_masks() -> np.ndarray:
+def load_masks(data_dir: str = DATA_DIR) -> np.ndarray:
     """Layout masks ``(N, 64, 64, 3)`` in ``[0, 1]``, aligned with ``load_images``."""
     cache = CACHE / "anime_faces_masks.npy"
     if cache.exists():
         return np.load(cache)
-    masks = rasterize(np.load(LANDMARKS_PATH)["landmarks"])
+    masks = rasterize(np.load(download(data_dir) / "landmarks.npz")["landmarks"])
     CACHE.mkdir(exist_ok=True)
     np.save(cache, masks)
     return masks
 
 
-def curated_indices() -> np.ndarray:
+def curated_indices(data_dir: str = DATA_DIR) -> np.ndarray:
     """Indices of the images the detector recognised as faces.
 
     ``landmarks.npz`` carries a ``keep`` flag: mean landmark confidence at least
     0.3.  Below that the set is dominated by non-faces (torsos, hands,
     duplicated crops; 1.5 % of the images), which are excluded from training.
     """
-    return np.flatnonzero(np.load(LANDMARKS_PATH)["keep"])
+    return np.flatnonzero(np.load(download(data_dir) / "landmarks.npz")["keep"])
 
 
 Pair = tuple[np.ndarray, np.ndarray]

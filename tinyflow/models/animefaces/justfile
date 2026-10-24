@@ -1,0 +1,20 @@
+# The anime-face experiment.  From the repo root: `just anime <recipe>`; from this
+# directory: `just <recipe>`.  Recipes not found here (`check`, `setup`, ...) fall
+# back to the root justfile.  Paths are relative to the repo root.
+
+set fallback := true
+
+root := justfile_directory() / "../../.."
+
+# Train the model: 125 epochs on one 4090 in about an hour -> runs/anime/.
+train *args:
+    uv run --directory {{root}} main.py anime train {{args}}
+
+# Distil runs/anime/model.eqx into a 2-evaluation flow map + ONNX -> runs/distil/.
+distil *args:
+    uv run --directory {{root}} --extra export main.py anime distil {{args}}
+
+# e.g. `just showcase ./runs/distil/model.eqx --n-jumps 2` for the distilled map.
+# Figures from a checkpoint (default: runs/anime/model.eqx, ODE sampler).
+showcase *args:
+    uv run --directory {{root}} main.py anime showcase {{args}}

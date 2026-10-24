@@ -2,14 +2,15 @@
 
 The image model is conditioned on a three-channel layout mask -- the convex
 hulls of the face, the two eyes and the mouth -- rasterised from 28 face
-landmarks (``hysts/anime-face-detector`` on the training images; the arrays
-ship with the repository, see ``data/README.md``).  At sampling time layouts
+landmarks (``hysts/anime-face-detector`` on the training images, downloaded
+with them by ``animefaces.download``).  At sampling time layouts
 are drawn from ``LayoutPrior``, a Gaussian mixture over a point-distribution
 model of those landmarks, so no real image is involved in generation.
 
 Landmark layout, image coordinates in ``[-1, 1]``: 0-4 chin contour, 5-7 / 8-10
 brows, 11-16 / 17-22 eyes, 23 nose, 24-27 mouth.  Everything here is numpy;
-fitting the prior needs scikit-learn and was done once (``data/README.md``).
+fitting the prior needs scikit-learn and was done once; the fitted prior ships
+with the package.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from pathlib import Path
 import numpy as np
 
 PRIOR_PATH = Path(__file__).parent / "landmark_prior.npz"
-LANDMARKS_PATH = Path(__file__).parent / "landmarks.npz"
 
 # Landmark groups.  Region masks are the hulls of these point sets.
 FACE = slice(0, 11)  # chin contour (0-4) + brows (5-10)

@@ -8,13 +8,13 @@ import jax
 import numpy as np
 from PIL import Image
 
-from data.animefaces import to_uint8
-from data.layouts import LayoutPrior
+from tinyflow.data.layouts import LayoutPrior
+from tinyflow.trainer import to_uint8
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from models.animefaces.flow import ImageFM
+    from tinyflow.models.animefaces.flow import ImageFM
 
 
 def mask_rgb(masks: np.ndarray) -> np.ndarray:
@@ -44,8 +44,7 @@ def showcase(model: ImageFM, outdir: Path, n_jumps: int = 0, seed: int = 0) -> N
         masks = prior.sample_masks(n, seed=seed_)
         noise = jax.random.normal(key, (n, 64, 64, 3))
         m = jax.numpy.asarray(masks)
-        out = model.jump(noise, m, n_jumps) if n_jumps else model.generate(noise, m)
-        return masks, np.asarray(out)
+        return masks, np.asarray(model.sample(noise, m, n_jumps))
 
     _, grid = sample(k1, 48, seed)
     tile([grid[i : i + 8] for i in range(0, 48, 8)]).save(outdir / "samples.png")

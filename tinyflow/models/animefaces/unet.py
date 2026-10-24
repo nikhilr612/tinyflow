@@ -27,7 +27,7 @@ Design, every point of it measured against the alternative:
   Feeding the masks at the input as well was measured to change nothing.
 * **A second time input ``s``**, through a zero-initialised projection of the
   embedding of ``s - t``, turns the same network into a flow map
-  ``x_hat(x_t, m, t, s)`` for distillation (``distill.py``); with ``s`` omitted
+  ``x_hat(x_t, m, t, s)`` for distillation (``distil.py``); with ``s`` omitted
   it is exactly the velocity model.
 """
 
