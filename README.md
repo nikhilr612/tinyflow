@@ -4,15 +4,20 @@
 A short and sweet implementation of flow matching models in the JAX ecosystem,
 with an emphasis on readability, simplicity, cleanliness and reproducibility.
 
-Two tracks share the flow-matching recipe:
+Three tracks share the flow-matching recipe:
 
 - **Toy** (`tinyflow/data/toycardioid.py`, `tinyflow/models/toyfm.py`): a standalone,
   instructive implementation of the plain flow matching recipe on a 2-D
-  dataset, seconds to train, no dependency on the image track.
+  dataset, seconds to train, no dependency on the image tracks.
 - **Anime faces** (`tinyflow/data/animefaces.py`, `tinyflow/data/layouts.py`,
-  `tinyflow/models/animefaces/`): 64x64 unconditional generation with
+  `tinyflow/models/animefaces/`): 64x64 unconditional generation with landmark priors, 
   layout-conditioned region pooling and a distilled 2-evaluation sampler. See
   `data/README.md` for the dataset and its provenance.
+- **Radar to optical** (`tinyflow/data/senbridge.py`, `tinyflow/models/senbridge/`):
+  128x128 Sentinel-1 radar to Sentinel-2 optical translation on
+  [SEN-Bridge](https://huggingface.co/datasets/nikhilr01/sen-bridge), with a
+  stochastic interpolant from each radar image to its optical pair and a
+  transformer (DiT) denoiser.
 
 ## Get started
 
@@ -73,6 +78,7 @@ and `export` the ONNX export of distilled samplers.  The command line
 
 [`notebooks/demo.py`](notebooks/demo.py) is a [marimo](https://marimo.io)
 notebook that uses the package this way: it trains and samples both models, on
-short schedules, in about an hour on one GPU.  It declares its own dependencies,
-so it runs as is on [molab](https://molab.marimo.io) or locally with
-`uvx marimo edit --sandbox notebooks/demo.py`.
+short schedules, in about an hour on one GPU.  In a checkout, run it in the
+project's environment with marimo added for the session:
+`uv run --with marimo marimo edit notebooks/demo.py`.
+It declares dependencies (PEP 723), which [molab](https://molab.marimo.io) installs.
