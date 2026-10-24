@@ -90,7 +90,7 @@ def _(mo):
     clean image $\hat x$; the velocity $(\hat x - x_t)/(1-t)$ is integrated
     from $t=0$ to $1$ in 8 midpoint steps.
 
-    The first run downloads the 63,565 faces (64×64) and the landmarks the
+    The first run downloads the 21,551 faces (64×64) and the landmarks the
     masks are drawn from, and caches both in the working directory.
     """)
     return
