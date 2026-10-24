@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 import jax
@@ -164,7 +165,7 @@ def jump(step: Callable, net: Any, x_0: Any, cond: Any, n_jumps: int) -> jax.Arr
         raise ValueError(f"n_jumps must be 1 or 2 (the trained jumps): {n_jumps}")
     times = grids[n_jumps]
     x = x_0
-    for t, s in zip(times[:-1], times[1:], strict=True):
+    for t, s in pairwise(times):
         x = step(net, x, cond, t, s)
     return x
 
