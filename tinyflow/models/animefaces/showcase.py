@@ -8,13 +8,13 @@ import jax
 import numpy as np
 from PIL import Image
 
-from data.layouts import LayoutPrior
-from trainer import to_uint8
+from tinyflow.data.layouts import LayoutPrior
+from tinyflow.trainer import to_uint8
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from models.animefaces.flow import ImageFM
+    from tinyflow.models.animefaces.flow import ImageFM
 
 
 def mask_rgb(masks: np.ndarray) -> np.ndarray:

@@ -15,18 +15,21 @@ check:
     uv run ruff check
     uv run ty check
 
-# Fetch the anime-faces images (huggan/anime-faces on the Hub) into data/anime-faces/.
+# Fetch the anime-faces images and landmarks (pinned, from the Hub) into data/anime-faces/.
 data:
-    uv run hf download huggan/anime-faces data.zip --repo-type dataset --local-dir data/anime-faces
-    unzip -q -o data/anime-faces/data.zip -d data/anime-faces
-    mv data/anime-faces/data data/anime-faces/images
+    uv run python -c "from tinyflow.data import animefaces; animefaces.download()"
 
 # The 2-D toy flow model -> runs/toymodel.eqx.
 toy:
-    uv run python data/toycardioid.py
+    uv run python -m tinyflow.data.toycardioid
     uv run main.py toy ./toycardioid.npy ./runs/toymodel.eqx
 
-# The recipes live in models/animefaces/justfile, which also runs from that directory.
+# The recipes live in tinyflow/models/animefaces/justfile, which also runs from that directory.
 # The anime-face experiment: `just anime train|distil|showcase [ARGS]`, bare to list.
 anime *args="--list":
-    @just --justfile models/animefaces/justfile {{args}}
+    @just --justfile tinyflow/models/animefaces/justfile {{args}}
+
+# The recipes live in tinyflow/models/senbridge/justfile, which also runs from that directory.
+# The radar-to-optical experiment: `just senbridge train|evaluate [ARGS]`, bare to list.
+senbridge *args="--list":
+    @just --justfile tinyflow/models/senbridge/justfile {{args}}

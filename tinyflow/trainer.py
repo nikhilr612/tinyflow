@@ -20,11 +20,14 @@ The jit contract.  A trainer is a frozen dataclass of Python scalars, so it is
 hashable and ``eqx.filter_jit`` treats it as static: one compilation per set of
 hyperparameters, and subclasses must keep to scalar fields.  ``loss`` is traced
 inside the jitted step, so it is pure JAX and draws all of its randomness from
-``key``.  The network is any pytree; its inexact-array leaves are the trained
-parameters and everything else is held fixed.
+``key``.  The learned function ``net`` -- a velocity field, a denoiser, a flow
+map -- is any pytree; its inexact-array leaves are the trained parameters and
+everything else is held fixed.
 
-``run`` consumes ``fit`` and owns the bookkeeping: a checkpoint, the loss
-history and a row of samples after every epoch.
+A ``Checkpoint`` is a learned function and the constructor arguments that
+rebuild it: what a run writes every epoch, and what sampling loads.  ``run``
+consumes ``fit`` and owns the bookkeeping: the checkpoint, the loss history and
+a row of samples after every epoch.
 """
 
 from __future__ import annotations
@@ -32,7 +35,8 @@ from __future__ import annotations
 import abc
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Self
 
 import equinox as eqx
 import jax
@@ -44,7 +48,6 @@ from tqdm import tqdm
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
-    from pathlib import Path
 
     from jaxtyping import Array, Float, PRNGKeyArray
 
@@ -146,14 +149,36 @@ def save_grid(images: np.ndarray, path: Path) -> None:
     Image.fromarray(to_uint8(np.concatenate(list(images), axis=1))).save(path)
 
 
-class Checkpoint(Protocol):
-    """What ``run`` needs of a model: its network, and a way to save it."""
+class Checkpoint:
+    """A learned function and the constructor arguments that rebuild it.
 
-    net: Any
+    A plain Python class around the function, not an ``eqx.Module``: ``net``
+    stays whatever pytree it is, with nothing of this project in its class
+    hierarchy, and the wrapper stays mutable (``run`` swaps ``net`` in after
+    every epoch).  An experiment subclasses it with its samplers.
+
+    The weights go to ``path`` and the arguments to ``path + ".hparams"`` as
+    JSON.  Deserialising needs a skeleton of the right shape first: the
+    structure of ``skeleton_fn(key, **hparams)``, traced without initialising
+    any weights.
+    """
+
+    def __init__(self, net: Any, hparams: dict) -> None:
+        """``hparams``: ``net``'s constructor arguments, saved with the weights."""
+        self.net = net
+        self.hparams = hparams
 
     def save(self, path: str) -> None:
-        """Write the model to ``path``."""
-        ...
+        """Write the weights to ``path`` and the constructor arguments beside them."""
+        eqx.tree_serialise_leaves(path, self.net)
+        Path(path + ".hparams").write_text(json.dumps(self.hparams))
+
+    @classmethod
+    def load(cls, path: str, skeleton_fn: Callable[..., Any]) -> Self:
+        """Rebuild the function saved at ``path`` around ``skeleton_fn``'s structure."""
+        hparams = json.loads(Path(path + ".hparams").read_text())
+        skeleton = eqx.filter_eval_shape(skeleton_fn, key=jax.random.key(0), **hparams)
+        return cls(eqx.tree_deserialise_leaves(path, skeleton), hparams)
 
 
 def run[M: Checkpoint](

@@ -1,11 +1,11 @@
-"""Flow matching on images with x-prediction, generic over the denoising network.
+"""Flow matching on images with x-prediction, generic over the learned denoiser.
 
 The recipe (Lipman et al. 2023; the x-prediction form of Li & He 2026):
 
     x_t = t x_1 + (1 - t) x_0,      x_0 ~ N(0, I),  x_1 ~ data,  t in [0, 1]
 
-The network predicts the clean image, ``x_hat(x_t, m, t)``, conditioned on the
-layout masks ``m``; the velocity field is derived from it,
+The learned denoiser predicts the clean image, ``x_hat(x_t, m, t)``,
+conditioned on the layout masks ``m``; the velocity field is derived from it,
 
     v = (x_hat - x_t) / max(1 - t, floor),
 
@@ -17,13 +17,13 @@ so fine detail decided late in ``t`` is up-weighted, with the ``1 / (1 - t)^2``
 weight bounded by the floor (0.05, as in JiT).  The minimiser is
 ``E[x_1 | x_t, m]``; no auxiliary term is added to it, because any loss on
 ``x_hat`` against the sharp ``x_1`` is irreducible at that optimum and only
-biases the network toward hedged predictions (derived and measured: edge,
+biases the denoiser toward hedged predictions (derived and measured: edge,
 line, palette and mask-weighted variants all hurt or did nothing).
 
 Sampling integrates ``dx/dt = v(x, t)`` from noise at ``t = 0`` to ``t = 1``
-with the explicit midpoint scheme in 8 fixed steps (16 network evaluations;
+with the explicit midpoint scheme in 8 fixed steps (16 denoiser evaluations;
 measured to match Dopri5 with 16 steps at a sixth of the cost).  The same
-network, given a second time ``s``, is read as a *flow map* ``x_s = x_t +
+denoiser, given a second time ``s``, is read as a *flow map* ``x_s = x_t +
 (s - t) u(x_t, m, t, s)`` for the distilled one- and two-jump samplers
 (``distil.py``).
 
@@ -32,9 +32,7 @@ network, given a second time ``s``, is read as a *flow map* ``x_s = x_t +
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import diffrax
@@ -45,8 +43,7 @@ from beartype import beartype
 from einops import rearrange
 from jaxtyping import Array, Float, jaxtyped
 
-import distil
-from trainer import Trainer
+from tinyflow import distil, trainer
 
 if TYPE_CHECKING:
     from jaxtyping import PRNGKeyArray
@@ -58,7 +55,7 @@ N_STEPS = 8
 
 @runtime_checkable
 class Denoiser(Protocol):
-    """The network's signature: one sample in, its denoised prediction out.
+    """The denoiser's signature: one sample in, its denoised prediction out.
 
     ``s``, the flow map's second time, is only given by the distilled samplers.
     """
@@ -87,7 +84,7 @@ def mean_velocity(net: Denoiser, x, masks, t, s):
     trajectory through ``x_t``, so one jump is exact by construction; as
     ``s -> t`` it is the instantaneous ``velocity``.
 
-    The network still predicts an image, ``x_hat(x_t, t, s)``: the endpoint at
+    The denoiser still predicts an image, ``x_hat(x_t, t, s)``: the endpoint at
     ``t = 1`` of the straight line through ``x_t`` with slope ``u``, so
     ``u = (x_hat - x_t) / (1 - t)`` -- divided by the time left to ``t = 1``,
     not by ``s - t``.  Equivalently, a jump mixes ``x_t`` and ``x_hat`` by the
@@ -147,25 +144,13 @@ def _jump(net: Denoiser, x_0: jax.Array, masks: jax.Array, n_jumps: int):
     return jax.vmap(lambda x, m: distil.jump(jump_step, net, x, m, n_jumps))(x_0, masks)
 
 
-class ImageFM:
-    """A denoising network plus everything that turns it into a generator."""
+class ImageFM(trainer.Checkpoint):
+    """A ``Denoiser`` plus everything that turns it into a generator.
 
-    def __init__(self, net: Denoiser, hparams: dict) -> None:
-        """``hparams``: the network's constructor arguments, saved with the weights."""
-        self.net = net
-        self.hparams = hparams
+    ``trainer.Checkpoint`` holds the denoiser and saves and loads it.
+    """
 
-    def save(self, path: str) -> None:
-        """Write the weights to ``path`` and the constructor arguments beside them."""
-        eqx.tree_serialise_leaves(path, self.net)
-        Path(path + ".hparams").write_text(json.dumps(self.hparams))
-
-    @classmethod
-    def load(cls, path: str, skeleton_fn) -> ImageFM:
-        """Rebuild with ``skeleton_fn(key, **hparams)`` and read the weights into it."""
-        hparams = json.loads(Path(path + ".hparams").read_text())
-        skeleton = skeleton_fn(key=jax.random.key(0), **hparams)
-        return cls(eqx.tree_deserialise_leaves(path, skeleton), hparams)
+    net: Denoiser
 
     def sample(self, x_0: jax.Array, masks: jax.Array, n_jumps: int = 0) -> jax.Array:
         """Images from noise ``(B, H, W, 3)``, one layout per sample.
@@ -194,7 +179,7 @@ class ImageFM:
 
 
 @dataclass(frozen=True)
-class FlowTrainer(Trainer):
+class FlowTrainer(trainer.Trainer):
     """The anime-face training recipe: ``Trainer``'s defaults plus the draw of ``t``.
 
     Adam at a peak of 1e-3 with a 500-step linear warm-up and a cosine decay to

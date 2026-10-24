@@ -3,24 +3,73 @@ name = "tinyflow"
 version = "0.1.0"
 description = "A short and sweet implementation of generative flow models."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Nikhil R." }]
 requires-python = ">=3.13"
+keywords = ["flow-matching", "stochastic-interpolants", "generative-models", "jax", "equinox"]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     "beartype>=0.22.4",
     "diffrax>=0.7.2",
     "einops>=0.8.1",
     "equinox>=0.13.2",
-    "grain>=0.2.14",
-    "huggingface-hub>=1.0",
-    "jax[cuda13]>=0.8.0",
+    # 0.10.x: 0.12.0 and 0.12.0.1 miscompile RegionPool's einsum on GPU (XLA's Triton
+    # GEMM fusion), and 0.11 breaks the export extra's flax 0.12.8.
+    "jax>=0.10.0,<0.11",
     "jaxtyping>=0.3.3",
+    "numpy>=2.0",
     "optax>=0.2.6",
     "pillow>=11.0",
     "tqdm>=4.67.3",
-    "typer-slim>=0.20.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/nikhilr612/tinyflow"
+DOI = "https://doi.org/10.5281/zenodo.22876650"
+
 [project.optional-dependencies]
+# tinyflow.data: the pipelines and the downloads (the SEN-Bridge release reader,
+# the anime faces on the Hub).
+datasets = [
+    "grain>=0.2.14",
+    "huggingface-hub>=1.0",
+    "sen-bridge @ git+https://github.com/nikhilr612/sen-bridge@v0.1.2",
+]
 export = ["jax2onnx>=0.16", "onnxruntime>=1.20"]
+
+# The repository's command line (main.py, tinyflow/models/*/cli.py), not the library:
+# typer, SEN-Bridge's benchmark metrics for `evaluate`, and JAX's CUDA plugin
+# (the library itself leaves the accelerator to whoever installs it).
+[dependency-groups]
+cli = [
+    "tinyflow[datasets]",
+    "typer-slim>=0.20.0",
+    "sen-bridge[jax] @ git+https://github.com/nikhilr612/sen-bridge@v0.1.2",
+    "jax[cuda13]>=0.8.0; sys_platform == 'linux'",
+]
+
+[tool.uv]
+default-groups = ["cli"]
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+# The command line ships with the repository, not the wheel.
+wheel-exclude = ["tinyflow/models/*/cli.py", "tinyflow/models/*/justfile"]
+
+[tool.ty.src]
+# The notebooks declare their own environment (PEP 723), which this one is not.
+exclude = ["notebooks"]
 
 [tool.ruff.lint]
 extend-select = [

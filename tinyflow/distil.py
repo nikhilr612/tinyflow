@@ -21,12 +21,12 @@ caller starts it from the teacher's weights -- on every jump of the grid
     L = E || jump(x_t, c, t, s) - x_s^teacher ||^2,
 
 where ``jump(x_t, c, t, s) = x_t + (s - t) u_theta(x_t, c, t, s)`` reads the
-network, given a second time ``s``, as the trajectory's velocity averaged over
-``[t, s]``.  How ``u`` is read from the network is the experiment's
-parametrisation, so ``MapTrainer.jump_step`` is left to a subclass; the student
-network must take the second time input.  ``jump`` chains single jumps along
-the same grid into the one- and two-jump samplers, and ``export_onnx`` writes
-a sampler as one ONNX graph.
+student, given a second time ``s``, as the trajectory's velocity averaged over
+``[t, s]``: a flow map.  How ``u`` is read from the student is the
+experiment's parametrisation, so ``MapTrainer.jump_step`` is left to a
+subclass; the student must take the second time input.  ``jump`` chains single
+jumps along the same grid into the one- and two-jump samplers, and
+``export_onnx`` writes a sampler as one ONNX graph.
 
 The grid is the contract between the three: ``teacher`` returns its states at
 the times the labels ``HALF`` and ``1`` stand for, ``jump_batches`` trains on
@@ -51,7 +51,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from trainer import Trainer
+from tinyflow.trainer import Trainer
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence

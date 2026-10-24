@@ -15,12 +15,11 @@ import numpy as np
 import typer
 from tqdm import tqdm
 
-import data.animefaces as faces
-import distil
-import trainer
-from data.layouts import LayoutPrior
-from models.animefaces import showcase as sc
-from models.animefaces.flow import (
+import tinyflow.data.animefaces as faces
+from tinyflow import distil, trainer
+from tinyflow.data.layouts import LayoutPrior
+from tinyflow.models.animefaces import showcase as sc
+from tinyflow.models.animefaces.flow import (
     T_END,
     FaceMapTrainer,
     FlowTrainer,
@@ -28,7 +27,7 @@ from models.animefaces.flow import (
     jump_step,
     solve,
 )
-from models.animefaces.unet import UNet
+from tinyflow.models.animefaces.unet import UNet
 
 app = typer.Typer(add_completion=False, help="Layout-conditioned 64x64 anime faces.")
 
