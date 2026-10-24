@@ -1,0 +1,17 @@
+# The SEN-Bridge experiment.  From the repo root: `just senbridge <recipe>`; from
+# this directory: `just <recipe>`.  Recipes not found here (`check`, `setup`, ...)
+# fall back to the root justfile.  Paths are relative to the repo root; the data
+# (~17 GB) and the metrics' weights download on first use into the sen-bridge cache.
+
+set fallback := true
+
+root := justfile_directory() / "../../.."
+
+# Train the bridge -> runs/senbridge/.
+train *args:
+    uv run --directory {{root}} main.py senbridge train {{args}}
+
+# e.g. `just evaluate ./runs/senbridge/model.eqx --split test --n 0` for the benchmark.
+# FID, LPIPS, PSNR, SSIM and colour error of a checkpoint (default: 5,000 validation pairs).
+evaluate *args:
+    uv run --directory {{root}} main.py senbridge evaluate {{args}}
