@@ -177,13 +177,15 @@ def solve(
     kappa: float = 0.0,
     key: PRNGKeyArray | None = None,
     n_steps: int = N_STEPS,
+    trajectory: bool = False,
 ) -> jax.Array:
     """Optical images ``(B, H, W, 3)`` from radar images, their ``meta``, noise ``z``.
 
     Starts at ``T0`` from ``alpha sar + gamma z`` and steps to ``t = 1`` on
     ``grid(n_steps)``, two exact steps per interval (module docstring): ``2
     n_steps`` denoiser evaluations.  ``kappa > 0`` samples the SDE instead,
-    drawing its noise from ``key``.
+    drawing its noise from ``key``.  ``trajectory`` returns every state on the
+    grid instead, ``(B, n_steps + 1, H, W, 3)``.
     """
     if kappa and key is None:
         raise ValueError("kappa > 0 samples an SDE: pass a key for its noise")
@@ -196,10 +198,13 @@ def solve(
             mid = step(x, net(x, s, m, t), s, t, (t + u) / 2)
             x_hat = net(mid, s, m, (t + u) / 2)
             xi = jax.random.normal(ki, x.shape) if kappa else None
-            return step(x, x_hat, s, t, u, kappa, xi), None
+            x = step(x, x_hat, s, t, u, kappa, xi)
+            return x, x if trajectory else None
 
         steps = (ts[:-1], ts[1:], jax.random.split(k, n_steps))
-        return jax.lax.scan(interval, alpha0 * s + gamma0 * n, steps)[0]
+        x_0 = alpha0 * s + gamma0 * n
+        x_1, xs = jax.lax.scan(interval, x_0, steps)
+        return jnp.concatenate([x_0[None], xs]) if trajectory else x_1
 
     keys = jax.random.split(jax.random.key(0) if key is None else key, len(sar))
     return jax.vmap(one)(sar, meta, z, keys)
@@ -221,16 +226,17 @@ class Bridge(trainer.Checkpoint):
         kappa: float = 0.0,
         key: PRNGKeyArray | None = None,
         n_steps: int = N_STEPS,
+        trajectory: bool = False,
     ) -> jax.Array:
         """Optical images in ``[-1, 1]`` for radar images ``(B, H, W, 3)``, also in it.
 
         ``z`` ``(B, H, W, 3)`` is the noise, one draw per sample; ``kappa > 0``
         samples the SDE, its noise drawn from ``key``; ``2 n_steps`` denoiser
         evaluations.  The denoiser runs in ``COMPUTE_DTYPE``; the state is
-        integrated in float32.
+        integrated in float32.  ``trajectory``: every state, as in ``solve``.
         """
         net = cast(self.net, COMPUTE_DTYPE)
-        return solve(net, sar, meta, z, kappa, key, n_steps)
+        return solve(net, sar, meta, z, kappa, key, n_steps, trajectory)
 
     @staticmethod
     @jaxtyped(typechecker=beartype)
