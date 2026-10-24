@@ -67,6 +67,7 @@ def teacher_pairs(
     teacher: Callable[[Any, Any], tuple[Any, Any]],
     inputs: Iterable[tuple[Any, Any]],
     dtype: type = np.float16,
+    cond: Any = None,
 ) -> dict[str, Any]:
     """The inputs and the teacher's states at ``HALF`` and the end, as numpy.
 
@@ -74,18 +75,21 @@ def teacher_pairs(
     leading batch axis, ``()`` for none -- and ``teacher(x_0, cond)`` returns
     ``(x_half, x_1)``.  Sources and states are stored as ``dtype``; float16
     halves the memory and, for states in ``[-1, 1]``, rounds by ~1e-3, far
-    below the distillation loss.  ``cond`` is stored as given.
+    below the distillation loss.  ``cond`` is stored as given.  A caller that
+    already holds all the conditioning, in the order of ``inputs``, passes it as
+    ``cond`` to be returned as is, not copied batch by batch.
     """
     states: dict[str, list] = {"x_0": [], "x_half": [], "x_1": []}
     conds = []
-    for x_0, cond in inputs:
-        half, end = teacher(x_0, cond)
+    for x_0, c in inputs:
+        half, end = teacher(x_0, c)
         for k, v in zip(states, (x_0, half, end), strict=True):
             states[k].append(np.asarray(v, dtype))
-        conds.append(jax.tree.map(np.asarray, cond))
-    return {k: np.concatenate(v) for k, v in states.items()} | {
-        "cond": jax.tree.map(lambda *c: np.concatenate(c), *conds)
-    }
+        if cond is None:
+            conds.append(jax.tree.map(np.asarray, c))
+    if cond is None:
+        cond = jax.tree.map(lambda *c: np.concatenate(c), *conds)
+    return {k: np.concatenate(v) for k, v in states.items()} | {"cond": cond}
 
 
 def jump_batches(

@@ -53,6 +53,10 @@ def train(
     seed: int = 0,
 ):
     """Train the radar-to-optical bridge (the recipe in bridge.py)."""
+    if 0 < n_train < batch_size:
+        raise typer.BadParameter(
+            f"--n-train {n_train} is below --batch-size {batch_size}: no whole batch"
+        )
     rows = np.arange(n_train) if n_train else None
     dataset, batches = sb.make_dataset(_split("train"), batch_size, seed, rows)
     hparams = {"width": width, "depth": depth, "heads": heads}
@@ -114,12 +118,15 @@ def evaluate(
     from huggingface_hub import hf_hub_download
     from sen_bridge import jax as metrics
 
-    model = Bridge.load(checkpoint, DiT)
     pairs = _split(split)
+    if not 0 <= offset < len(pairs):
+        raise typer.BadParameter(f"--offset {offset} is outside the {len(pairs)} pairs")
+    model = Bridge.load(checkpoint, DiT)
     # Subsets are slices of one fixed shuffle, so different offsets are disjoint;
-    # ``seed`` only draws the sampler's noise.
+    # ``seed`` only draws the sampler's noise.  ``--n 0`` is everything from
+    # ``offset`` on.
     order = np.random.default_rng(0).permutation(len(pairs))
-    rows = np.sort(order[offset : offset + n] if n else order)
+    rows = np.sort(order[offset : offset + n] if n else order[offset:])
     stats = hf_hub_download(
         STATS_REPO,
         f"stats/fid_{split}.npz",
@@ -152,8 +159,11 @@ def evaluate(
     text = json.dumps(result, indent=1)
     typer.echo(text)
     tag = f"{split}_n{len(rows)}_o{offset}_k{kappa:g}_N{n_steps}_s{seed}"
-    out = Path(checkpoint).with_name(f"{Path(checkpoint).stem}_metrics_{tag}")
-    out.with_suffix(".json").write_text(text)
+    # Not ``with_suffix``: the dot in a fractional kappa would pass for an extension.
+    stem = f"{Path(checkpoint).stem}_metrics_{tag}"
+    Path(checkpoint).with_name(f"{stem}.json").write_text(text)
     np.savez(
-        out.with_suffix(".npz"), rows=rows, scores=np.stack(list(per_image.values()))
+        Path(checkpoint).with_name(f"{stem}.npz"),
+        rows=rows,
+        scores=np.stack(list(per_image.values())),
     )

@@ -96,7 +96,7 @@ def distil_(
 
     n_teacher = -(-n_pairs // teacher_batch)
     pairs = distil.teacher_pairs(
-        teacher, tqdm(inputs(), total=n_teacher, desc="teacher")
+        teacher, tqdm(inputs(), total=n_teacher, desc="teacher"), cond=masks
     )
 
     # Each tile of the sample row: one jump above, two jumps below.
