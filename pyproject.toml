@@ -54,9 +54,13 @@ cli = [
     "sen-bridge[jax] @ git+https://github.com/nikhilr612/sen-bridge@v0.1.2",
     "jax[cuda13]>=0.8.0; sys_platform == 'linux'",
 ]
+dev = [
+    "ruff==0.17.2",
+    "ty==0.0.91",
+]
 
 [tool.uv]
-default-groups = ["cli"]
+default-groups = ["cli", "dev"]
 
 [build-system]
 requires = ["uv_build>=0.11.8,<0.12"]
@@ -94,6 +98,10 @@ extend-select = [
     "NPY",      # Some numpy-specific things
 ]
 ignore = ['F722']
+
+[tool.ruff.lint.per-file-ignores]
+# marimo's file format: every cell ends in ``return``, and a bare name displays it.
+"notebooks/*" = ["B018", "PLR1711"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
