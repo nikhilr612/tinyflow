@@ -2,7 +2,7 @@
 # requires-python = ">=3.13"
 # dependencies = [
 #     "marimo",
-#     "tinyflow[datasets] @ git+https://github.com/nikhilr612/tinyflow@feat/sen-bridge",
+#     "tinyflow[datasets] @ git+https://github.com/nikhilr612/tinyflow@v0.1.0",
 #     "jax[cuda13]>=0.10.0,<0.11; sys_platform == 'linux'",
 # ]
 # ///

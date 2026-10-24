@@ -11,8 +11,9 @@ Three tracks share the flow-matching recipe:
   dataset, seconds to train, no dependency on the image tracks.
 - **Anime faces** (`tinyflow/data/animefaces.py`, `tinyflow/data/layouts.py`,
   `tinyflow/models/animefaces/`): 64x64 unconditional generation with landmark priors, 
-  layout-conditioned region pooling and a distilled 2-evaluation sampler. See
-  `data/README.md` for the dataset and its provenance.
+  layout-conditioned region pooling and a distilled 2-evaluation sampler
+  ([demo on Hugging Face](https://huggingface.co/spaces/nikhilr01/animefaces-distil-0.03b),
+  on CPU). See `data/README.md` for the dataset and its provenance.
 - **Radar to optical** (`tinyflow/data/senbridge.py`, `tinyflow/models/senbridge/`):
   128x128 Sentinel-1 radar to Sentinel-2 optical translation on
   [SEN-Bridge](https://huggingface.co/datasets/nikhilr01/sen-bridge), with a
@@ -67,7 +68,7 @@ generic, and an experiment supplies only its loss and sampler.
 ## As a library
 
 ```sh
-pip install "tinyflow[datasets] @ git+https://github.com/nikhilr612/tinyflow" "jax[cuda13]"
+pip install "tinyflow[datasets] @ git+https://github.com/nikhilr612/tinyflow@v0.1.0" "jax[cuda13]"
 ```
 
 The core runs on CPU; `jax[cuda13]` (or `jax[tpu]`) adds the accelerator, as with
@@ -78,7 +79,9 @@ and `export` the ONNX export of distilled samplers.  The command line
 
 [`notebooks/demo.py`](notebooks/demo.py) is a [marimo](https://marimo.io)
 notebook that uses the package this way: it trains and samples both models, on
-short schedules, in about an hour on one GPU.  In a checkout, run it in the
+short schedules, in about an hour on one GPU: [open it in
+molab](https://molab.marimo.io/github/nikhilr612/tinyflow/blob/master/notebooks/demo.py).
+In a checkout, run it in the
 project's environment with marimo added for the session:
 `uv run --with marimo marimo edit notebooks/demo.py`.
 It declares dependencies (PEP 723), which [molab](https://molab.marimo.io) installs.
