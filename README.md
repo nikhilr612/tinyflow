@@ -20,6 +20,16 @@ Three tracks share the flow-matching recipe:
   stochastic interpolant from each radar image to its optical pair and a
   transformer (DiT) denoiser.
 
+<p align="center">
+  <img src="docs/animefaces.gif" width="16%" alt="An anime face integrated from noise">
+  <img src="docs/senbridge.png" width="81%" alt="A radar image carried across the bridge to an optical image, beside the real one">
+</p>
+
+Left, a face integrated from noise by the anime-face model.  Right, the bridge
+on a validation pair (the clearest of 64 drawn at random): the radar image, two
+states on the way, the sample, and after the gap the optical image actually
+taken.
+
 ## Get started
 
 This project uses [`uv`](https://astral.sh/uv) and [`just`](https://github.com/casey/just):

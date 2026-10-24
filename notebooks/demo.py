@@ -13,6 +13,37 @@ import marimo
 __generated_with = "0.25.2"
 app = marimo.App(width="medium")
 
+with app.setup(hide_code=True):
+    # The header above is read by uv and marimo's sandbox.  A hosted notebook
+    # (molab) instead installs a missing import by its name, and "tinyflow" on
+    # PyPI is another project: so where this one or JAX's CUDA plugin is
+    # missing, install both from the release before any cell imports them.
+    import importlib.util
+    import shutil
+    import subprocess
+    import sys
+    from importlib.metadata import distributions
+    from pathlib import Path
+
+    _spec = importlib.util.find_spec("tinyflow")  # finds, does not import
+    _dirs = _spec.submodule_search_locations or [] if _spec else []
+    _ours = any((Path(d) / "trainer.py").exists() for d in _dirs)
+    _cuda = any(d.metadata["Name"] == "jax-cuda13-plugin" for d in distributions())
+    if not (_ours and (_cuda or sys.platform != "linux")):
+        _uv = shutil.which("uv")
+        _pip = [_uv, "pip"] if _uv else [sys.executable, "-m", "pip"]
+        subprocess.run(
+            [
+                *_pip,
+                "install",
+                *(["--python", sys.executable] if _uv else []),
+                "tinyflow[datasets] @ git+https://github.com/nikhilr612/tinyflow@v0.1.0",
+                "jax[cuda13]>=0.10.0,<0.11; sys_platform == 'linux'",
+            ],
+            check=True,
+        )
+        importlib.invalidate_caches()
+
 
 @app.cell(hide_code=True)
 def _(mo):
